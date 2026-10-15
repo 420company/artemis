@@ -1215,8 +1215,13 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
     assert(`preview: a server behind a runner gets its own kind and card — ${command}`,
       found?.kind === expectedKind && found.risk === 'medium' && shown?.title === expectedTitle && !/删除|改写文件/.test(shown.summary.replace(/删除或改写工作文件夹/g, '')), JSON.stringify({ kind: found?.kind, shown }))
   }
-  assert('preview: su -c (no login) and flock keep the workspace: a loopback server there needs nothing',
-    kind('su -c "python3 -m http.server --bind 127.0.0.1" nobody') === null && kind('flock /tmp/lock python3 -m http.server --bind 127.0.0.1') === null && kind('systemd-run --same-dir python3 -m http.server --bind 127.0.0.1') === null)
+  assert('preview: flock and systemd-run --user -d keep the workspace and the user: a loopback server there needs nothing',
+    kind('flock /tmp/lock python3 -m http.server --bind 127.0.0.1') === null && kind('systemd-run --user -d python3 -m http.server --bind 127.0.0.1') === null, JSON.stringify(classify('systemd-run --user -d python3 -m http.server --bind 127.0.0.1')))
+  // A server run as another user (round 6): su, runuser, sudo, a system service (root by default).
+  for (const command of ['su -c "python3 -m http.server --bind 127.0.0.1" nobody', 'runuser -u nobody -- python3 -m http.server --bind 127.0.0.1', 'sudo python3 -m http.server --bind 127.0.0.1', 'sudo -u www-data python3 -m http.server --bind 127.0.0.1', 'systemd-run --same-dir python3 -m http.server --bind 127.0.0.1', 'systemd-run --user -d -p User=nobody python3 -m http.server --bind 127.0.0.1']) {
+    const found = classify(command)
+    assert(`preview: a local server as another user asks (medium) — ${command}`, found?.kind === 'shell_high_risk' && found.risk === 'medium' && card(command)?.title === '以另一个用户的身份启动本地网页服务', JSON.stringify({ found, card: card(command) }))
+  }
   // A relative delete after a directory not known before it runs (round 5): find -delete too.
   for (const command of ['sudo -i find . -delete', 'sudo --login find build -delete', 'sudo --logi find build -delete', 'env -C "$D" find . -delete', 'cd "$D" && find . -delete', 'cd /e* && find . -delete', 'cd /e* && find build -name "*.o" -delete']) {
     assert(`preview: find -delete after an unknown directory asks — ${command}`, kind(command) === 'delete_outside_workspace', JSON.stringify(classify(command)))
@@ -1244,6 +1249,59 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
   // sudo's long options may be shortened; chroot --userspec takes a value (round 5).
   assert('preview: sudo --logi and sudo --chd are --login and --chdir', kind('sudo --logi tee x') === 'delete_outside_workspace' && kind('sudo --chd /usr/share tee doc/x') === 'delete_outside_workspace')
   assert('preview: chroot --userspec u:g ROOT reads ROOT', listeningServers('chroot --userspec u:g /srv python3 -m http.server --bind 127.0.0.1', cwd)[0]?.directories === undefined && listeningServers('chroot --userspec u:g /srv python3 -m http.server --bind 127.0.0.1', cwd).length === 1)
+  // Round 6: reading into runners only ever adds asks.
+  const round6: [string, string][] = [
+    ['systemd-run --on-clock-change rm -rf /usr/share/doc', 'a valueless --on-clock-change before the command'],
+    ['systemd-run --on-timezone-change rm -rf /usr/share/doc', 'a valueless --on-timezone-change'],
+    ['su --logi -c "rm -rf build" nobody', 'su --logi (a login)'],
+    ['su --log -c "rm -rf build" nobody', 'su --log (a login)'],
+    ['su -lc "rm -rf build" nobody', 'su -lc (a login in a cluster)'],
+    ['runuser --login -u nobody -- rm -rf build', 'runuser --login'],
+    ['su --frobnicate -c "rm -rf build" nobody', 'an su option the classifier does not know'],
+    ['flock --frobnicate /tmp/lock rm -rf build', 'a flock option the classifier does not know'],
+    ['systemd-run --frobnicate --same-dir rm -rf build', 'a systemd-run option the classifier does not know'],
+    ['flock /tmp/lock mytool run tee out.txt', 'a command flock runs that the classifier does not read'],
+    ['systemd-run -d --working-directory=/usr/share rm -rf doc', 'a later --working-directory wins over -d'],
+    ['systemd-run -d -p WorkingDirectory=/usr/share rm -rf doc', 'a later WorkingDirectory= wins over -d'],
+    ['systemd-run -d -p RootDirectory=/srv rm -rf build', 'RootDirectory= makes the directory unknown'],
+    ['systemd-run -d -M box rm -rf build', '-M makes the directory unknown'],
+    ['systemd-run -d -H host rm -rf build', '-H makes the directory unknown'],
+    ['ls | xargs -i cp {} /usr/share/x', 'xargs -i (an attached optional value) then cp'],
+    ['ls | xargs -I {} cp {} dest', 'xargs -I {} then cp'],
+    ['ls | xargs -J % cp % dest', 'BSD xargs -J then cp'],
+    ['ls | xargs -0 nice cp -t dest', 'xargs nice cp'],
+    ['ls | xargs timeout 5 tee out', 'xargs timeout 5 tee'],
+    ['ls | xargs --frobnicate rm', 'an xargs option the classifier does not know, then rm'],
+    ['ls | xargs --frobnicate grep tee', 'an xargs option that may take a value: the broad scan sees tee'],
+    ['python -W ignore run.py rm -rf build', 'python -W ignore before the script'],
+    ['node -r ./hook.js run.js rm -rf build', 'node -r hook before the script'],
+  ]
+  for (const [command, why] of round6) {
+    const found = classify(command)
+    assert(`preview: round 6 — ${why} asks: ${command}`, found !== null && (found.kind === 'delete_outside_workspace' || found.kind === 'shell_high_risk'), JSON.stringify(found))
+  }
+  {
+    // ~ and $HOME in su code are the other user's: with HOME at the workspace, the agent's own ~ would look inside.
+    const home = process.env.HOME
+    process.env.HOME = cwd
+    try {
+      assert('preview: round 6 — ~ and $HOME in su code are the other user\'s home (they ask)', kind('su -c "rm -rf ~/notes" nobody') !== null && kind('su -c "rm -rf $HOME/notes" nobody') !== null && kind('runuser -u nobody -- rm -rf ~/notes') !== null)
+      assert('preview: round 6 — su -m keeps the home (the agent\'s own, here the workspace)', kind('su -m -c "rm -rf ~/notes" nobody') === null, JSON.stringify(classify('su -m -c "rm -rf ~/notes" nobody')))
+    } finally {
+      if (home === undefined) delete process.env.HOME
+      else process.env.HOME = home
+    }
+  }
+  // The precise reading, not only the safety net: the paths and reasons come from the command read into.
+  assert('preview: round 6 — systemd-run --on-clock-change takes no value: the rm is read and its path named',
+    analyzeDeletes('systemd-run --on-clock-change rm -rf /usr/share/doc', cwd).outside.includes('/usr/share/doc') && card('systemd-run --on-timezone-change rm -rf /usr/share/doc')!.summary.includes('/usr/share/doc'), JSON.stringify(analyzeDeletes('systemd-run --on-clock-change rm -rf /usr/share/doc', cwd)))
+  assert('preview: round 6 — su --logi and --log are a login: the directory is not known',
+    /directory not known/.test(analyzeDeletes('su --logi -c "rm -rf build" nobody', cwd).unverifiable ?? '') && /directory not known/.test(analyzeDeletes('su --log -c "rm -rf build" nobody', cwd).unverifiable ?? ''),
+    JSON.stringify(analyzeDeletes('su --logi -c "rm -rf build" nobody', cwd)))
+  assert('preview: round 6 — read-only runners stay quiet', ['watch git status', 'watch -n5 curl -s https://example.com/', 'tmux new -d "git pull"', 'screen -dm wget -qO- https://example.com/', 'tmux new -d "find . -name x"', 'ls | xargs -I {} grep x {}', 'ls | xargs -0 -n1 grep -l install'].every((c) => kind(c) === null),
+    JSON.stringify(['watch git status', 'watch -n5 curl -s https://example.com/', 'tmux new -d "git pull"', 'screen -dm wget -qO- https://example.com/', 'tmux new -d "find . -name x"', 'ls | xargs -I {} grep x {}', 'ls | xargs -0 -n1 grep -l install'].map((c) => [c, kind(c)])))
+  // check(): a relative target after a directory not known before it runs is itself reported (not only the reason).
+  assert('preview: round 6 — the relative target after an unknown directory is named', analyzeDeletes('sudo -i rm -rf build', cwd).outside.includes('build') && analyzeDeletes('cd "$D" && rm -f notes.txt', cwd).outside.includes('notes.txt'), JSON.stringify(analyzeDeletes('sudo -i rm -rf build', cwd)))
   // Ordinary commands do not start asking.
   for (const command of ['env FOO=1 cp a b', 'make install', 'make clean', 'timeout 60 cp a b', 'nice tee notes.txt', 'git commit -m "rm old > files"', 'pytest -k cp tests', 'tmux new -s dev', 'screen -ls', 'myscript.sh --mode fast', 'npm run build > build.log 2>&1', 'docker ps', 'ffmpeg -i in.mp4 out.mp4']) {
     assert(`preview: an ordinary command still needs nothing — ${command}`, kind(command) === null, JSON.stringify(classify(command)))

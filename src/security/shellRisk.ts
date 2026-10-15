@@ -364,6 +364,8 @@ const WRAPPER_VALUE_LETTERS: Record<string, string> = { sudo: 'ugCphUrtDRT', doa
 const WRAPPER_LONG_OPTIONS: Record<string, string[]> = {
   sudo: ['askpass', 'background', 'bell', 'chdir', 'chroot', 'close-from', 'command-timeout', 'edit', 'group', 'help', 'host', 'list', 'login', 'non-interactive', 'other-user', 'preserve-env', 'preserve-groups', 'prompt', 'remove-timestamp', 'reset-timestamp', 'role', 'set-home', 'shell', 'stdin', 'type', 'user', 'validate', 'version'],
   env: ['argv0', 'block-signal', 'chdir', 'debug', 'default-signal', 'help', 'ignore-environment', 'ignore-signal', 'list-signal-handling', 'null', 'split-string', 'unset', 'version'],
+  su: ['command', 'session-command', 'fast', 'group', 'supp-group', 'login', 'preserve-environment', 'pty', 'shell', 'whitelist-environment', 'help', 'version'],
+  runuser: ['command', 'session-command', 'fast', 'group', 'supp-group', 'login', 'preserve-environment', 'pty', 'shell', 'whitelist-environment', 'user', 'help', 'version'],
 }
 
 /** A wrapper's long option spelled out in full (`--logi` → `--login`, `--chd=x` → `--chdir=x`); as written when not one. */
@@ -871,7 +873,17 @@ const RUNNERS = new Set([
   'entr', 'watchexec', 'nodemon', 'dtach', 'abduco', 'nq', 'tsp', 'pueue', 'sem', 'expect', 'sshpass',
 ])
 /** A word that deletes, writes or serves when it runs, anywhere in a runner's arguments (also inside a quoted string). */
-const RUN_WORD = /(?:^|[\s;&|(){}'"`])(?:[\w.~+-]*\/)*(?:rm|rmdir|unlink|shred|srm|wipe|trash|trash-put|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|sed|curl|wget|aria2c|yt-dlp|youtube-dl|axel|rsync|git|find|xargs)(?=$|[\s;&|)}'"`])|>/
+const RUN_WORD = new RegExp([
+  // Commands that delete or write whatever their arguments.
+  `(?:^|[\\s;&|(){}'"\`])(?:[\\w.~+-]*/)*(?:rm|rmdir|unlink|shred|srm|wipe|trash|trash-put|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|aria2c|yt-dlp|youtube-dl|axel|rsync|xargs)(?=$|[\\s;&|)}'"\`])`,
+  // Commands that only write in some uses: git clean/rm/mv/reset --hard/checkout --, sed -i, curl -o/-O, wget (it saves unless to stdout), find -delete/-exec.
+  `(?:^|[\\s;&|(){}'"\`/])git\\s+(?:-\\S+\\s+)*(?:clean|rm|mv|reset\\s+--hard|checkout\\s+--|restore)\\b`,
+  `(?:^|[\\s;&|(){}'"\`/])sed\\b[^;&|]*\\s(?:-[A-Za-z]*i|--in-place)`,
+  `(?:^|[\\s;&|(){}'"\`/])curl\\b[^;&|]*\\s(?:-[A-Za-z]*[oO]|--output|--remote-name|--output-dir)`,
+  `(?:^|[\\s;&|(){}'"\`/])wget\\b(?![^;&|]*(?:\\s-[A-Za-z]*O\\s*-(?:\\s|$)|--spider|--output-document=?-(?:\\s|$)))`,
+  `(?:^|[\\s;&|(){}'"\`/])find\\b[^;&|]*\\s-(?:delete|exec|execdir|ok|okdir|fprint\\w*|fls)\\b`,
+  '>',
+].join('|'))
 /** A web server word in a runner's arguments (left to listeningServers for the runners it reads into). */
 const RUN_SERVER_WORD = /\bhttp\.server\b|\bSimpleHTTPServer\b|(?:^|[\s;&|'"`/])php\b[^;&|]*\s-S|\bhttp-server\b|(?:^|[\s;&|'"`/])serve(?=$|\s)|\bhttpd\b/
 /** Runners whose command analyzeDeletes reads itself (unwrapRunner), in the directory it runs in. */
@@ -1169,7 +1181,10 @@ export function analyzeDeletes(fullCommand: string, cwd: string, depth = 0): Del
     let readInto = false
     if (head && !INTERPRETER_RE.test(head)) {
       const hereString = parsed.hereString ? args[args.indexOf('<<<') + 1] : undefined
-      const runnerText = [...plain, ...(hereString ? [hereString] : []), ...(parsed.heredoc ? [parsed.heredoc.body] : [])]
+      // All the arguments as one line (`git clean -fdx` given as separate words; a word's use is read
+      // with the words after it), and each string that holds a command of its own.
+      const runnerWords = [...plain, ...(hereString ? [hereString] : []), ...(parsed.heredoc ? [parsed.heredoc.body] : [])]
+      const runnerText = [runnerWords.join(' '), ...runnerWords.filter((w) => /\s/.test(w))]
       // `head` is the command past the wrappers commandHead reads (env, nice, timeout, …): those are checked as what they run.
       const inner = READ_INTO_RUNNERS.has(head) && depth < 2 ? unwrapRunner(head, plain) : undefined
       if (head === 'busybox' && plain[0] === 'httpd') {
@@ -1188,10 +1203,23 @@ export function analyzeDeletes(fullCommand: string, cwd: string, depth = 0): Del
         }
         if (found.removes) removes = true
         if (found.unverifiable) flag(found.unverifiable, found.unverifiableZh ?? found.unverifiable)
+        // su without -m/-p: `~` and $HOME are the other user's home.
+        if (inner.homeChanges && /(?:^|[\s=:'"])~|\$\{?HOME\b/.test(text) && (DESTRUCTIVE_TOKEN.test(text) || RUN_WORD.test(text))) {
+          flag(`uses the home of the user ${head} switches to`, `用到了 ${head} 切换到的那个用户的主目录`)
+        }
+        // A parse that is not certain (an option the classifier does not know, a command it does not
+        // read) only ever adds to the broad scan below, never replaces it.
+        if (!inner.certain || (inner.words !== undefined && !recognisedCommand(inner.words))) {
+          if (runnerText.some((a) => RUN_WORD.test(a) || DESTRUCTIVE_TOKEN.test(a) || RUN_SERVER_WORD.test(a))) flag(`runs a command through ${head} that may delete, write or serve files`, `会通过 ${head} 运行一条可能删除、改写或对外提供文件的命令`)
+          readInto = false
+        }
       } else if (head === 'xargs') {
         // xargs runs the command after its own options on the names it reads.
-        const command = xargsCommand(plain)
-        if (command !== undefined && XARGS_RISKY.test(path.basename(command))) flag(`passes names to ${path.basename(command)} through xargs`, `会通过 xargs 把文件名交给 ${path.basename(command)}`)
+        const run = xargsCommand(plain)
+        const command = run.words.length ? commandHead(run.words)?.name : undefined
+        if (command !== undefined && XARGS_RISKY.test(command)) flag(`passes names to ${command} through xargs`, `会通过 xargs 把文件名交给 ${command}`)
+        // Options it cannot read for sure: the broad scan too.
+        else if (!run.certain && runnerText.some((a) => RUN_WORD.test(a) || DESTRUCTIVE_TOKEN.test(a))) flag('passes names through xargs to a command that may delete or write files', '会通过 xargs 把文件名交给一条可能删除或改写文件的命令')
       } else if (RUNNERS.has(head)) {
         // chroot's paths are the new root's; the others run what they are given: a word that deletes,
         // writes or serves asks. chroot's servers are read by listeningServers (in a directory not known).
@@ -1200,13 +1228,13 @@ export function analyzeDeletes(fullCommand: string, cwd: string, depth = 0): Del
           flag(`runs a command through ${head} that may delete, write or serve files`, `会通过 ${head} 运行一条可能删除、改写或对外提供文件的命令`)
         }
       } else if (!KNOWN_COMMANDS.has(head) && !DELETE_COMMANDS.has(head)) {
-        if (passesACommand(plain, runnerText)) {
+        if (passesACommand(plain, runnerWords)) {
           flag(`passes a command that may delete, write or serve files to ${head}, a program the classifier cannot follow`, `把一条可能删除、改写或对外提供文件的命令交给了无法确认的程序 ${head}`)
         }
       }
     } else if (head && !(args.some((a) => new RegExp(`^(?:${INLINE_FLAG}|-r|--eval|--command)$`).test(a)) || parsed.heredoc)) {
       // An interpreter or a shell running a script: the script's own arguments as for a program the classifier cannot follow.
-      const scriptAt = plain.findIndex((a) => !a.startsWith('-'))
+      const scriptAt = scriptIndex(head, plain)
       const scriptArgs = scriptAt < 0 ? [] : plain.slice(scriptAt + 1)
       if (passesACommand(scriptArgs, scriptArgs)) {
         flag(`passes a command that may delete, write or serve files to the script ${plain[scriptAt]}, which the classifier cannot follow`, `把一条可能删除、改写或对外提供文件的命令交给了脚本 ${plain[scriptAt]}，无法确认它会做什么`)
@@ -1434,24 +1462,64 @@ function otherDownloadTargets(head: string, args: string[]): { files: string[]; 
   return { files, directories, ...(unknown ? { unknown } : {}) }
 }
 
+/** Options of an interpreter or a shell that take the next word as their value (not the script). */
+const INTERPRETER_VALUE_OPTIONS: [RegExp, RegExp][] = [
+  [/^python/i, /^-[WXQ]$/],
+  [/^(?:node|deno|bun)$/i, /^(?:-r|--require|--import|--loader|--experimental-loader|-C|--conditions|--env-file|--input-type|--title)$/],
+  [/^ruby$/i, /^-[rICE]$/],
+  [/^perl$/i, /^-[IMx]$/],
+  [/^php$/i, /^-[cdz]$/],
+  [/^lua$/i, /^-[l]$/],
+  [/^(?:ba|z|k|da)?sh$/, /^(?:-[oO]|[+][oO]|--rcfile|--init-file)$/],
+]
+
+/** Where the script is in an interpreter's arguments (after its options and their values); -1 when there is none. */
+function scriptIndex(name: string, args: string[]): number {
+  const valued = INTERPRETER_VALUE_OPTIONS.find(([who]) => who.test(name))?.[1]
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k]!
+    if (a === '--') return k + 1 < args.length ? k + 1 : -1
+    if (valued?.test(a)) {
+      k++
+      continue
+    }
+    if (a.startsWith('-') || a.startsWith('+')) continue
+    return k
+  }
+  return -1
+}
+
 /** A shell word, quoted so it reads back as itself. */
 function shellQuote(word: string): string {
   return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`
 }
 
-/** The command xargs runs: the first word after its own options (and their values). */
-function xargsCommand(args: string[]): string | undefined {
+/**
+ * The command xargs runs: the words after its own options. GNU's -i, -l,
+ * -e, --replace, --eof and --max-lines take an optional value attached to
+ * them (never the next word); -a, -d, -E, -I, -L, -n, -P, -s and BSD's -J,
+ * -R, -S take the next word. `certain` is false when an option was not one
+ * of these.
+ */
+function xargsCommand(args: string[]): { words: string[]; certain: boolean } {
+  let certain = true
   for (let k = 0; k < args.length; k++) {
     const a = args[k]!
-    if (a === '--') return args[k + 1]
-    if (/^-[aEeIiLlnPsd]$|^--(?:arg-file|delimiter|eof|replace|max-lines|max-args|max-procs|max-chars|process-slot-var)$/.test(a)) {
+    if (a === '--') return { words: args.slice(k + 1), certain }
+    if (/^-[ile]/.test(a) || /^--(?:replace|eof|max-lines)(?:=|$)/.test(a)) continue
+    if (/^-[adEILnPsJRS]$/.test(a) || /^--(?:arg-file|delimiter|max-args|max-procs|max-chars|process-slot-var)$/.test(a)) {
       k++
       continue
     }
-    if (a.startsWith('-')) continue
-    return a
+    if (/^-[adEILnPsJRS]./.test(a) || /^--(?:arg-file|delimiter|max-args|max-procs|max-chars|process-slot-var)=/.test(a)) continue
+    if (/^-[0prtxo]+$/.test(a) || /^--(?:null|no-run-if-empty|interactive|verbose|exit|open-tty|show-limits)$/.test(a)) continue
+    if (a.startsWith('-')) {
+      certain = false
+      continue
+    }
+    return { words: args.slice(k), certain }
   }
-  return undefined
+  return { words: [], certain }
 }
 
 /** A program's arguments carry a command that deletes, writes or serves: as the first operand, or as a string holding a whole command. */
@@ -1551,6 +1619,8 @@ export interface ListeningServer {
   unsureRun?: boolean
   /** Files it runs besides what it serves (php's router script), as written. */
   runs?: string[]
+  /** It runs as another user (sudo, su, runuser, a system service: root by default). */
+  otherUser?: boolean
   /** The directory it serves, when certain (for the card's wording). */
   directory?: string
   /**
@@ -1809,10 +1879,12 @@ interface PlacedCommand {
   here: string | undefined
   /** Every directory it may run in (the start and every static cd before it); undefined after a cd not known before it runs. */
   heres: string[] | undefined
+  /** It runs as another user (sudo, doas, su, runuser, pkexec, a system service). */
+  otherUser?: boolean
 }
 
 /** The command's simple commands, in order, each with the directory it runs in (a static cd is followed), and the inline code of `sh -c` read the same way. */
-function placedCommands(command: string, cwd: string, depth = 0, start: string[] | null = [cwd]): PlacedCommand[] {
+function placedCommands(command: string, cwd: string, depth = 0, start: string[] | null = [cwd], asOther = false): PlacedCommand[] {
   const out: PlacedCommand[] = []
   let here: string | undefined = cwd
   // null: the directory is not known (undefined would take the default).
@@ -1839,21 +1911,26 @@ function placedCommands(command: string, cwd: string, depth = 0, start: string[]
     if (head && SHELL_NAME.test(head.name) && depth < 2) {
       const code = inlineProgram(head.name, args)?.code
       if (code !== undefined) {
-        out.push(...placedCommands(code, here ?? cwd, depth + 1, heres ?? null).map((c) => (here === undefined ? { ...c, here: undefined } : c)))
+        out.push(...placedCommands(code, here ?? cwd, depth + 1, heres ?? null, asOther).map((c) => (here === undefined ? { ...c, here: undefined } : c)))
         continue
       }
     }
     // A program that runs a command of its own (su -c, flock, chroot, systemd-run): that command, in
     // the directory it runs in (unknown when the program changes it: a login, a new root, a service).
+    // sudo, doas, pkexec before the command: it runs as another user.
+    const otherUser = asOther || (head ? parsed.words.slice(0, head.index).some((w) => /^(?:sudo|doas|pkexec)$/.test(path.basename(w))) : false)
     const inner = head && depth < 2 ? unwrapRunner(head.name, args) : undefined
     if (inner) {
-      const innerHeres = inner.keepsDir ? heres : inner.dir !== undefined ? (path.isAbsolute(inner.dir) ? [inner.dir] : heres?.map((base) => path.resolve(base, inner.dir!))) : undefined
-      const innerHere = inner.keepsDir ? here : innerHeres?.length === 1 ? innerHeres[0] : undefined
+      // Options it could not read for sure: the directory is not known either.
+      const innerHeres = !inner.certain ? undefined : inner.keepsDir ? heres : inner.dir !== undefined ? (path.isAbsolute(inner.dir) ? [inner.dir] : heres?.map((base) => path.resolve(base, inner.dir!))) : undefined
+      const innerHere = inner.certain && inner.keepsDir ? here : innerHeres?.length === 1 ? innerHeres[0] : undefined
+      const innerOther = otherUser || inner.otherUser
       if (inner.code !== undefined) {
-        out.push(...placedCommands(inner.code, innerHere ?? cwd, depth + 1, innerHeres ?? null).map((c) => (innerHere === undefined ? { ...c, here: undefined } : c)))
+        out.push(...placedCommands(inner.code, innerHere ?? cwd, depth + 1, innerHeres ?? null, innerOther).map((c) => (innerHere === undefined ? { ...c, here: undefined } : c)))
       } else if (inner.words?.length) {
         const innerHead = commandHead(inner.words)
-        out.push({ parsed: { words: inner.words, join: 'list' }, head: innerHead, args: innerHead ? inner.words.slice(innerHead.index + 1) : [], here: innerHere, heres: innerHeres })
+        const innerOtherUser = innerOther || inner.words.slice(0, innerHead?.index ?? 0).some((w) => /^(?:sudo|doas|pkexec)$/.test(path.basename(w)))
+        out.push({ parsed: { words: inner.words, join: 'list' }, head: innerHead, args: innerHead ? inner.words.slice(innerHead.index + 1) : [], here: innerHere, heres: innerHeres, ...(innerOtherUser ? { otherUser: true } : {}) })
       }
       continue
     }
@@ -1861,40 +1938,96 @@ function placedCommands(command: string, cwd: string, depth = 0, start: string[]
     const wrapped = afterWrapperChanges(parsed.words, heres)
     if (wrapped.changed) {
       const certain = afterWrapperChanges(parsed.words, here === undefined ? undefined : [here]).bases
-      out.push({ parsed, head, args, here: certain?.length === 1 ? certain[0] : undefined, heres: wrapped.bases })
+      out.push({ parsed, head, args, here: certain?.length === 1 ? certain[0] : undefined, heres: wrapped.bases, ...(otherUser ? { otherUser: true } : {}) })
       continue
     }
-    out.push({ parsed, head, args, here, heres })
+    out.push({ parsed, head, args, here, heres, ...(otherUser ? { otherUser: true } : {}) })
   }
   return out
 }
 
+/** What a runner runs and where, as far as its options can be read. */
+interface Unwrapped {
+  code?: string
+  words?: string[]
+  /** It runs in the same directory (else `dir`, or not known). */
+  keepsDir: boolean
+  dir?: string
+  /** Every option was one the classifier knows: otherwise the broad scan applies too. */
+  certain: boolean
+  /** It runs as another user (su, runuser, a system service): its servers ask. */
+  otherUser: boolean
+  /** `~` and `$HOME` in its code are the other user's (su without -m/-p). */
+  homeChanges?: boolean
+}
+
 /**
- * The command a runner runs: su/runuser -c CODE, flock [opts] FILE CMD… (or
- * -c CODE), chroot [opts] ROOT CMD…, systemd-run [opts] CMD…; and whether it
- * runs in the same directory (`dir`: where it runs instead, when named).
+ * The command a runner runs: su/runuser [-c] CODE, flock [opts] FILE CMD…
+ * (or -c CODE), chroot [opts] ROOT CMD…, systemd-run [opts] CMD…; where it
+ * runs, as whom, and whether its options were all read for sure.
  */
-function unwrapRunner(name: string, args: string[]): { code?: string; words?: string[]; keepsDir: boolean; dir?: string } | undefined {
+function unwrapRunner(name: string, args: string[]): Unwrapped | undefined {
   const valueOf = (k: number, a: string) => (a.includes('=') ? a.slice(a.indexOf('=') + 1) : args[k + 1])
   if (name === 'su' || name === 'runuser') {
-    const at = args.findIndex((a) => a === '-c' || a === '--command' || a.startsWith('--command='))
-    if (at < 0) return undefined
-    const login = args.some((a) => a === '-' || a === '-l' || a === '--login')
-    return { code: valueOf(at, args[at]!) ?? '', keepsDir: !login }
+    let code: string | undefined
+    let login = false
+    let preserve = false
+    let certain = true
+    for (let k = 0; k < args.length; k++) {
+      const a = fullLongOption(name, args[k]!)
+      // Past `--`: the command (runuser) or the shell's arguments (su), not options.
+      if (a === '--') break
+      if (a === '-') login = true
+      else if (a === '--login') login = true
+      else if (a === '--preserve-environment') preserve = true
+      else if (/^--(?:fast|pty)$/.test(a)) continue
+      else if (/^--(?:command|session-command)(?:=|$)/.test(a)) {
+        code = valueOf(k, a)
+        if (!a.includes('=')) k++
+      } else if (/^--(?:shell|group|supp-group|whitelist-environment|user)(?:=|$)/.test(a)) {
+        if (!a.includes('=')) k++
+      } else if (/^-[A-Za-z]/.test(a) && !a.startsWith('--')) {
+        // A cluster, letter by letter: c, s, g, G, w (u for runuser) take a value (the rest, or the next word).
+        for (let c = 1; c < a.length; c++) {
+          const ch = a[c]!
+          if (ch === 'l') login = true
+          else if (ch === 'm' || ch === 'p') preserve = true
+          else if (ch === 'f' || ch === 'P') continue
+          else if ('csgGw'.includes(ch) || (name === 'runuser' && ch === 'u')) {
+            const value = a.slice(c + 1) || args[++k]
+            if (ch === 'c') code = value
+            break
+          } else certain = false
+        }
+      } else if (a.startsWith('--')) certain = false
+    }
+    // runuser -u USER [--] COMMAND…: a command of words (su passes the words after the user to the shell as arguments).
+    if (code === undefined && name === 'runuser') {
+      const dashes = args.indexOf('--')
+      const words = dashes >= 0 ? args.slice(dashes + 1) : []
+      if (words.length) return { words, keepsDir: !login, certain, otherUser: true, homeChanges: !preserve }
+    }
+    if (code === undefined) return undefined
+    return { code, keepsDir: !login, certain, otherUser: true, homeChanges: !preserve }
   }
   if (name === 'flock') {
+    let certain = true
     for (let k = 0; k < args.length; k++) {
       const a = args[k]!
-      if (a === '-c' || a === '--command' || a.startsWith('--command=')) return { code: valueOf(k, a) ?? '', keepsDir: true }
+      if (a === '-c' || a === '--command' || a.startsWith('--command=')) return { code: valueOf(k, a) ?? '', keepsDir: true, certain, otherUser: false }
       if (/^(?:-w|-E|--timeout|--wait|--conflict-exit-code)$/.test(a)) {
         k++
         continue
       }
-      if (a.startsWith('-')) continue
+      if (/^-[sxunoFe]+$|^--(?:shared|exclusive|unlock|nonblock|nb|close|no-fork|verbose)$|^--(?:timeout|wait|conflict-exit-code)=/.test(a)) continue
+      if (a.startsWith('-')) {
+        certain = false
+        continue
+      }
       // The lock file, then the command (or -c CODE after it).
       const rest = args.slice(k + 1)
-      if (rest[0] === '-c' || rest[0] === '--command') return { code: rest[1] ?? '', keepsDir: true }
-      return { words: rest, keepsDir: true }
+      if (rest[0] === '-c' || rest[0] === '--command') return { code: rest[1] ?? '', keepsDir: true, certain, otherUser: false }
+      return { words: rest, keepsDir: true, certain, otherUser: false }
     }
     return undefined
   }
@@ -1907,35 +2040,74 @@ function unwrapRunner(name: string, args: string[]): { code?: string; words?: st
         continue
       }
       if (a.startsWith('-')) continue
-      return { words: args.slice(k + 1), keepsDir: false }
+      return { words: args.slice(k + 1), keepsDir: false, certain: true, otherUser: true }
     }
     return undefined
   }
   if (name === 'systemd-run') {
+    // The directory, in order (a later option wins): -d keeps it, --working-directory / WorkingDirectory=
+    // name one; RootDirectory=, RootImage=, -M and -H make it unknown for good (another root, machine or host).
     let keepsDir = false
     let dir: string | undefined
+    let lost = false
+    let user = false
+    let switchesUser = false
+    let certain = true
+    const workingDirectory = (value: string | undefined) => {
+      keepsDir = false
+      const known = value === undefined ? undefined : staticPath(value.replace(/^-/, ''))
+      if (known === undefined || !path.isAbsolute(known)) lost = true
+      else dir = known
+    }
     for (let k = 0; k < args.length; k++) {
       const a = args[k]!
-      if (a === '-d' || a === '--same-dir') keepsDir = true
+      if (a === '-d' || a === '--same-dir') {
+        keepsDir = true
+        dir = undefined
+      } else if (a === '--user') user = true
+      else if (a === '--system') user = false
       else if (a === '--working-directory' || a.startsWith('--working-directory=')) {
-        dir = staticPath(valueOf(k, a) ?? '')
+        workingDirectory(valueOf(k, a))
         if (!a.includes('=')) k++
-      } else if (/^(?:-[upEMH]|--(?:unit|property|description|slice|setenv|uid|gid|nice|machine|host|on-[a-z-]+|timer-property|path-property|socket-property|service-type|slice-inherit))$/.test(a)) k++
-      else if (a.startsWith('-')) continue
-      else return { words: args.slice(k), keepsDir, ...(dir !== undefined ? { dir } : {}) }
+      } else if (a === '-p' || a === '--property' || a.startsWith('--property=') || /^-p./.test(a)) {
+        const property = a.startsWith('--property=') ? a.slice('--property='.length) : /^-p./.test(a) ? a.slice(2) : args[++k] ?? ''
+        if (/^WorkingDirectory=/.test(property)) workingDirectory(property.slice('WorkingDirectory='.length))
+        else if (/^(?:RootDirectory|RootImage)=/.test(property)) lost = true
+        else if (/^(?:User|Group|DynamicUser)=/.test(property)) switchesUser = true
+      } else if (/^(?:-[MH]|--(?:machine|host))$/.test(a) || /^--(?:machine|host)=/.test(a)) {
+        lost = true
+        if (!a.includes('=')) k++
+      } else if (/^(?:--uid|--gid)(?:=|$)/.test(a)) {
+        switchesUser = true
+        if (!a.includes('=')) k++
+      } else if (/^(?:-[uE]|--(?:unit|description|slice|setenv|nice|on-active|on-boot|on-startup|on-unit-active|on-unit-inactive|on-calendar|timer-property|path-property|socket-property|service-type))$/.test(a)) k++
+      else if (/^--(?:unit|description|slice|setenv|nice|on-active|on-boot|on-startup|on-unit-active|on-unit-inactive|on-calendar|timer-property|path-property|socket-property|service-type)=/.test(a)) continue
+      else if (/^(?:-[tPqGSr]+|--(?:scope|pty|pipe|quiet|collect|wait|shell|remain-after-exit|no-block|send-sighup|no-ask-password|on-clock-change|on-timezone-change|slice-inherit|ignore-failure|expand-environment=\S*))$/.test(a)) continue
+      else if (a.startsWith('-')) certain = false
+      else {
+        const known = !lost && !keepsDir && dir !== undefined
+        return { words: args.slice(k), keepsDir: !lost && keepsDir, ...(known ? { dir } : {}), certain, otherUser: !user || switchesUser }
+      }
     }
     return undefined
   }
   return undefined
 }
 
+/** A runner's inner command is one the classifier reads (a known program, an interpreter, a delete command, another runner). */
+function recognisedCommand(words: string[] | undefined): boolean {
+  const head = words && commandHead(words)
+  if (!head) return false
+  return KNOWN_COMMANDS.has(head.name) || DELETE_COMMANDS.has(head.name) || INTERPRETER_RE.test(head.name) || RUNNERS.has(head.name)
+}
+
 /** The web servers a command starts (followed through `cd`, wrappers and `sh -c`). */
 export function listeningServers(command: string, cwd: string): ListeningServer[] {
   const servers: ListeningServer[] = []
-  for (const { head, args, here, heres } of placedCommands(withoutHeredocBodies(command), cwd)) {
+  for (const { head, args, here, heres, otherUser } of placedCommands(withoutHeredocBodies(command), cwd)) {
     if (!head) continue
     const server = serverOf(head.name, args, here, heres)
-    if (server) servers.push(server)
+    if (server) servers.push({ ...server, ...(otherUser ? { otherUser: true } : {}) })
   }
   return servers
 }

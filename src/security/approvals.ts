@@ -817,6 +817,17 @@ export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext):
           { wording: outsideServerWording(dirs, runs, summary, servesOutside.some((server) => server.unsureRun)) },
         )
       }
+      // A server run as another user (sudo, su, runuser, a system service: root by default) serves what that user reads.
+      const asOther = servers.filter((server) => server.otherUser)
+      if (asOther.length) {
+        const ports = [...new Set(asOther.map((server) => server.port))].join(', ')
+        return need(
+          'shell_high_risk',
+          'medium',
+          { command: action.command, reason: `starts a web server on port ${ports} as another user`, reasonZh: `会以另一个用户的身份在端口 ${ports} 上启动网页服务` },
+          { wording: otherUserServerWording(ports, summary) },
+        )
+      }
       return null
     }
     case 'bridge_send_image':
@@ -982,6 +993,20 @@ function outsideServerWording(dirs: string[], runs: boolean, summary: { zh: stri
     en: {
       title: runs ? 'Start a local web server that runs files from outside the workspace' : 'Start a local web server that serves files from outside the workspace',
       summary: `${summary ? `${summary.en} ` : ''}It listens on this machine only, but other programs and users on this machine can reach it and ${what.en}. It runs only if you approve.`,
+    },
+  }
+}
+
+/** The card for a local web server run as another user. */
+function otherUserServerWording(ports: string, summary: { zh: string; en: string } | undefined): NonNullable<ApprovalNeed['wording']> {
+  return {
+    zh: {
+      title: '以另一个用户的身份启动本地网页服务',
+      summary: `${summary?.zh ?? `这条命令会在端口 ${ports} 上启动网页服务。`}它会以另一个用户（默认是管理员）的身份运行，能读到并提供那个用户可以访问的文件。只有你同意后才会运行。`,
+    },
+    en: {
+      title: 'Start a local web server as another user',
+      summary: `${summary ? `${summary.en} ` : `This command starts a web server on port ${ports}. `}It runs as another user (the administrator by default) and can read and serve whatever that user can. It runs only if you approve.`,
     },
   }
 }
