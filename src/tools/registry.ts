@@ -95,8 +95,6 @@ import {
 } from './taskManager.js';
 import { executeSearchFiles } from './searchFiles.js';
 import { executeSearchWeb } from './searchWeb.js';
-import { executeHttpRequest } from './httpRequest.js';
-import { executeWebScraper } from './webScraper.js';
 import { executeWriteFile } from './writeFile.js';
 import { executeBridgeSendImage } from './bridgeSendImage.js';
 import { executeBridgeSendVideo } from './bridgeSendVideo.js';
@@ -2001,43 +1999,16 @@ const actionToolDefs: ToolDefinition[] = [
 ];
 
 const capabilityToolDefs: ToolDefinition[] = [
-    {
-    type: 'http_request',
-    description: '发送 HTTP(S) 请求并返回响应。仅 GET/POST/HEAD；内置 SSRF 防护（DNS 预检 + 连接时 pin 预检 IP，防 DNS 重绑定；拦截内网/保留地址，含 ::ffff: 映射形）；最多 5 次重定向（每跳重验）；默认 30 秒超时 + 10 秒无数据看门狗；5MB 响应上限。Authorization 须经 authHeader 字段显式传入。',
-    kind: 'code',
-    permissionCategory: 'execute',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: (action: any) => {
-      const errors: string[] = [];
-      validateRequiredNonEmptyString(action?.url, 'url', errors);
-      validateEnumString(action?.method, 'method',
-        ['GET', 'POST', 'HEAD'] as const, errors);
-      validatePositiveInteger(action?.timeoutMs, 'timeoutMs', errors);
-      return errors;
-    },
-    execute: executeHttpRequest as any,
-  },
-  {
-    type: 'web_scraper',
-    description: '从指定 URL 抓取网页并提取可读正文（自动去除 script/style/导航等噪音）。底层复用 http_request 的安全 fetch 管道。非 HTML 内容返回原文前 100k 字符。',
-    kind: 'code',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: (action: any) => {
-      const errors: string[] = [];
-      validateRequiredNonEmptyString(action?.url, 'url', errors);
-      validatePositiveInteger(action?.timeoutMs, 'timeoutMs', errors);
-      validatePositiveInteger(action?.maxChars, 'maxChars', errors);
-      return errors;
-    },
-    execute: executeWebScraper as any,
-  },
-  // NOTE: 5 stub tools (`search`, `user_interaction`, `confirm`, `mcp`,
-  // `notebook_worktree`) remain removed — each has a working replacement
-  // (`search_web`, `request_user_confirmation`, `mcp_call_tool`, newer
-  // notebook tools). The /mcp slash command lives in interactive.ts.
+  // NOTE: removed 7 stub tools (`http_request`, `search`, `web_scraper`,
+  // `user_interaction`, `confirm`, `mcp`, `notebook_worktree`) that were
+  // declared with executionMode='blocking' but had no `execute` function.
+  // The /mcp slash command lives in interactive.ts. The agent's `todo` tool
+  // (below) keeps the plan on the conversation's task board (core/todoList.ts);
+  // the older TodoTool class in src/tools/TodoTool/ is not wired.
+  // declared with executionMode='blocking' but had no `execute` function.
+  // The /mcp slash command lives in interactive.ts. The agent's `todo` tool
+  // (above) keeps the plan on the conversation's task board (core/todoList.ts);
+  // the older TodoTool class in src/tools/TodoTool/ is not wired.
 
   // ── Spotify integration ────────────────────────────────────────────────
   // brain-callable tools that drive Spotify Web API. Authentication via
