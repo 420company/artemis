@@ -103,6 +103,11 @@ export type VideoModelProfile = {
   referenceInputs: readonly VideoReferenceKind[];
   firstFrame: boolean;
   canGenerateAudio: boolean;
+  /**
+   * Cuts between several camera shots inside one clip when the prompt asks
+   * for it, so a long-video plan can pack consecutive shots into one clip.
+   */
+  multiShot: boolean;
   /** 'platform' when an override changed anything. */
   source: 'builtin' | 'platform';
 };
@@ -118,31 +123,35 @@ const DIRECTED_PROMPT_CHARS = 2600;
 const SEEDANCE_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'] as const;
 const COMMON_RATIOS = ['16:9', '9:16', '1:1'] as const;
 const RESOLUTIONS = ['480p', '720p', '1080p'] as const;
-/**
- * L does not depend on resolution or aspect ratio: no Seedance 2.x clip
- * limit published so far varies with either, so every resolution and ratio a
- * profile lists renders clips up to its L. A provider that caps clips lower
- * at some resolution declares the lower figure in providers.json
- * (visualProfile.video.capabilities.maxClipSeconds, or fewer resolutions).
- */
 /** Unknown models: a conservative clip length most video APIs accept. */
 const OTHER_MAX_CLIP_SECONDS = 10;
 
+/**
+ * The built-in profile of a model id. L (maxClipSeconds) does not depend on
+ * resolution or aspect ratio: no Seedance 2.x clip limit published so far
+ * varies with either, so every resolution and ratio a profile lists renders
+ * clips up to its L. A provider that caps clips lower at some resolution
+ * declares the lower figure in providers.json
+ * (visualProfile.video.capabilities.maxClipSeconds, or fewer resolutions).
+ * multiShot is set only for the families known to cut between camera shots
+ * inside one clip; any other model is single-shot unless the platform
+ * declares otherwise (visualProfile.video.capabilities.multiShot).
+ */
 function builtinProfile(provider: string, model: string): Omit<VideoModelProfile, 'source'> {
   const key = normalize(model);
   const seedancePrompt = /seedance|dreamina/.test(key) ? SEEDANCE_PROMPT_CHARS : DIRECTED_PROMPT_CHARS;
   const base = { provider, model, maxPromptChars: seedancePrompt, resolutions: RESOLUTIONS };
   if (isSeedance25Model(model)) {
-    return { ...base, family: 'seedance-2.5', minClipSeconds: 4, maxClipSeconds: 30, ratios: SEEDANCE_RATIOS, referenceInputs: ['image', 'video', 'audio'], firstFrame: true, canGenerateAudio: true };
+    return { ...base, family: 'seedance-2.5', minClipSeconds: 4, maxClipSeconds: 30, ratios: SEEDANCE_RATIOS, referenceInputs: ['image', 'video', 'audio'], firstFrame: true, canGenerateAudio: true, multiShot: true };
   }
   if (isSeedance2Model(model)) {
-    return { ...base, family: 'seedance-2.0', minClipSeconds: 4, maxClipSeconds: 15, ratios: SEEDANCE_RATIOS, referenceInputs: ['image', 'video', 'audio'], firstFrame: true, canGenerateAudio: true };
+    return { ...base, family: 'seedance-2.0', minClipSeconds: 4, maxClipSeconds: 15, ratios: SEEDANCE_RATIOS, referenceInputs: ['image', 'video', 'audio'], firstFrame: true, canGenerateAudio: true, multiShot: true };
   }
   if (isSeedance15Model(model)) {
-    return { ...base, family: 'seedance-1.5', minClipSeconds: 4, maxClipSeconds: 12, ratios: SEEDANCE_RATIOS, referenceInputs: ['image'], firstFrame: true, canGenerateAudio: true };
+    return { ...base, family: 'seedance-1.5', minClipSeconds: 4, maxClipSeconds: 12, ratios: SEEDANCE_RATIOS, referenceInputs: ['image'], firstFrame: true, canGenerateAudio: true, multiShot: false };
   }
   if (isSeedance10Model(model)) {
-    return { ...base, family: 'seedance-1.0', minClipSeconds: 4, maxClipSeconds: 10, ratios: SEEDANCE_RATIOS, referenceInputs: ['image'], firstFrame: true, canGenerateAudio: false };
+    return { ...base, family: 'seedance-1.0', minClipSeconds: 4, maxClipSeconds: 10, ratios: SEEDANCE_RATIOS, referenceInputs: ['image'], firstFrame: true, canGenerateAudio: false, multiShot: false };
   }
   if (/^wan2\.[67]-/.test(key)) {
     const referenceInputs: VideoReferenceKind[] = key.includes('-r2v')
@@ -157,9 +166,10 @@ function builtinProfile(provider: string, model: string): Omit<VideoModelProfile
       referenceInputs,
       firstFrame: key.includes('-i2v'),
       canGenerateAudio: key.startsWith('wan2.6-') && key.includes('audio'),
+      multiShot: false,
     };
   }
-  return { ...base, family: 'other', minClipSeconds: 4, maxClipSeconds: OTHER_MAX_CLIP_SECONDS, ratios: COMMON_RATIOS, referenceInputs: [], firstFrame: false, canGenerateAudio: false };
+  return { ...base, family: 'other', minClipSeconds: 4, maxClipSeconds: OTHER_MAX_CLIP_SECONDS, ratios: COMMON_RATIOS, referenceInputs: [], firstFrame: false, canGenerateAudio: false, multiShot: false };
 }
 
 function positiveSeconds(value: unknown): number | undefined {
@@ -203,6 +213,7 @@ export function resolveVideoModelProfile(
     referenceInputs: referenceInputs ?? builtin.referenceInputs,
     firstFrame: typeof overrides.firstFrame === 'boolean' ? overrides.firstFrame : builtin.firstFrame,
     canGenerateAudio: typeof overrides.canGenerateAudio === 'boolean' ? overrides.canGenerateAudio : builtin.canGenerateAudio,
+    multiShot: typeof overrides.multiShot === 'boolean' ? overrides.multiShot : builtin.multiShot,
     source: 'platform',
   };
 }

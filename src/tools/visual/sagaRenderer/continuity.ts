@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { SagaContinuityBible, SagaSegmentInput } from './types.js';
 import { resolveFfmpegBinaryPath, resolveFfprobeBinaryPath } from './concat.js';
 import { buildSagaDialogueNote, extractSagaDialogueLines } from '../sagaLanguageDirector.js';
+import { SHOT_BEAT_MAX_CHARS, clipBeatBudget, clipBeatShotCount, fitClipBeat } from '../segmentPlan.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -182,6 +183,9 @@ function buildAudioLockBlock(): string {
 
 /** Longest shot content (beat and visual direction) a segment prompt opens with. */
 export const SHOT_CONTENT_MAX_CHARS = 1600;
+
+/** How far a clip's markers and dialogue may run past its beat budget before the beat is cut. */
+const CLIP_BEAT_OVERRUN_CHARS = 400;
 
 /** Longest identity card a segment prompt carries. */
 export const IDENTITY_CARD_MAX_CHARS = 1200;
@@ -638,7 +642,13 @@ export function compileShotPromptWithContinuity(options: {
   // that has to be shortened is cut from its lowest-priority blocks, so the
   // part that differs from shot to shot always survives.
   const shotHeader = `Shot ${options.shotIndex} of ${options.shotCount}, duration ${options.duration} seconds, title: ${options.title}.`;
-  const storyBeatText = clipText(options.storyBeat ?? '', SHOT_CONTENT_MAX_CHARS - 400);
+  // A clip of several camera shots gets room for each, and is shortened shot
+  // by shot (every marker and dialogue line kept), never cut off after the
+  // first shots.
+  const beatShots = clipBeatShotCount(options.storyBeat ?? '');
+  const storyBeatText = beatShots > 1
+    ? clipText(fitClipBeat(options.storyBeat ?? '', clipBeatBudget(beatShots)), clipBeatBudget(beatShots) + CLIP_BEAT_OVERRUN_CHARS)
+    : clipText(options.storyBeat ?? '', SHOT_BEAT_MAX_CHARS);
   // A timecoded shot's visual direction only repeats its beat; say it once.
   const visualDirection = options.visualPrompt && !repeatsStoryBeat(options.visualPrompt, options.storyBeat ?? '')
     ? `Visual direction: ${clipText(options.visualPrompt, Math.max(400, SHOT_CONTENT_MAX_CHARS - storyBeatText.length))}`

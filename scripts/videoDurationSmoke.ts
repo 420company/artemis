@@ -5,9 +5,24 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runHermeticSaga, videoTaskBodies, withHermeticWorkspace } from './sagaHermeticHarness.js';
+import { fixturePng, imageBodies, runHermeticSaga, videoTaskBodies, withHermeticWorkspace } from './sagaHermeticHarness.js';
+import { extractOpeningFramingRegex } from '../src/tools/visual/sagaFraming.js';
 import { ProviderStore } from '../src/providers/store.js';
-import { offsetBeatTimeline, packShotsIntoClips, planSegmentDurations, segmentCountFor, sentencesOf, splitBeatText, splitLongShots } from '../src/tools/visual/segmentPlan.js';
+import {
+  clipBeatBudget,
+  clipBeatShotCount,
+  fitClipBeat,
+  offsetBeatTimeline,
+  openingShotBeat,
+  openingShotCamera,
+  packShotsIntoClips,
+  planSegmentDurations,
+  renderClipBeat,
+  segmentCountFor,
+  sentencesOf,
+  splitBeatText,
+  splitLongShots,
+} from '../src/tools/visual/segmentPlan.js';
 import { resolveVideoModelCapabilities, resolveVideoModelProfile } from '../src/tools/visual/videoCapabilities.js';
 import { resolveVideoModelLimits } from '../src/tools/visual/videoModelLimits.js';
 import { normalizeVideoDurationForProvider } from '../src/tools/visual/videoParams.js';
@@ -510,7 +525,8 @@ await test('cinematic shot planning: natural shots packed into as few clips as f
     const beats = clips.map((clip) => clip.storyBeat).join(' ');
     natural.forEach((_, index) => assert.match(beats, new RegExp(`beat ${index + 1} starts`), `L=${L}: shot ${index + 1} kept`));
   }
-  assert.equal(on30.length, 3, `fewest clips on L=30 (${on30.map((clip) => clip.duration)})`);
+  assert.deepEqual(on30.map((clip) => clip.duration), [30, 30], `as many clips as 60 s takes on L=30, not one more (${on30.map((clip) => clip.duration)})`);
+  assert.deepEqual(on15.map((clip) => clip.duration), [15, 15, 15, 15], `L=15 (${on15.map((clip) => clip.duration)})`);
   assert.ok(on15.length > on30.length, 'the same story takes more clips on L=15');
   assert.ok(on30.length < shots.length, 'not one clip per shot');
   // Inside a packed clip each shot keeps its own length, framing and timeline.
@@ -531,6 +547,10 @@ await test('cinematic shot planning: natural shots packed into as few clips as f
   assert.equal(packShotsIntoClips(timed, 30).length, timed.length);
   assert.equal(packShotsIntoClips([{ title: 'a', storyBeat: 'x' }, { title: 'b', storyBeat: 'y' }], 30).length, 2);
   assert.equal(offsetBeatTimeline('0–3s: a. 3-7 s: b. 7s–end: c. 2.5–4秒：d。3-4 people wait.', 10, 12), '10–13s: a. 13–17s: b. 17–22s: c. 12.5–14秒：d。3-4 people wait.');
+  // Only a timeline position moves: not a pause length or a decade.
+  assert.equal(offsetBeatTimeline('0–4s: she waits, a 5-10s pause. Set in the 1990-2000s. 4s–end: she runs.', 10, 8), '10–14s: she waits, a 5-10s pause. Set in the 1990-2000s. 14–18s: she runs.');
+  // A shot whose length was adjusted to fit the clip keeps its timeline inside it, in whole seconds.
+  assert.equal(offsetBeatTimeline('0–2s: a. 2s–end: b.', 20, 10, { scale: 10 / 9 }), '20–22s: a. 22–30s: b.');
 });
 
 await test('cinematic generation: natural shots render in fewer clips on L=30; a long fallback clip is several shots', async () => {
@@ -546,7 +566,7 @@ await test('cinematic generation: natural shots render in fewer clips on L=30; a
   const on25 = await runHermeticSaga(action, { videoModel: 'dreamina-seedance-2.5' });
   assert.equal(on25.result.ok, true, on25.result.output);
   const durations25 = videoTaskBodies(on25.requests).map((body) => body.duration);
-  assert.equal(durations25.length, 3, `three clips on L=30 (${durations25})`);
+  assert.equal(durations25.length, 2, `two clips on L=30, as 60 s takes (${durations25})`);
   assert.ok(durations25.every((value) => value <= 30));
   assert.equal(durations25.reduce((sum, value) => sum + value, 0), 60);
   const text25 = JSON.stringify(videoTaskBodies(on25.requests)[0]);
@@ -583,7 +603,7 @@ await test('Saga plan prompt: natural shot lengths, clips up to the current L (z
     const prompt = done.handled ? '' : done.prompt ?? '';
     assert.match(prompt, /SHOT LENGTHS — Cut like an editor/);
     assert.match(prompt, new RegExp(`usually 4–15 s`));
-    assert.match(prompt, new RegExp(`each clip at most ${L} s with hard cuts inside it \\(about ${segmentCountFor(60, L)} clip\\(s\\) for 60 s\\)`));
+    assert.match(prompt, new RegExp(`clips of up to ${L} s with hard cuts inside them, ${segmentCountFor(60, L)} clips for 60 s`));
     assert.match(prompt, new RegExp(`never write a shot longer than ${L} s`));
     assert.doesNotMatch(prompt, /roughly equal length/, 'no clock-cut shots');
   }
@@ -617,7 +637,7 @@ await test('model change mid-wizard: L is read again; menus, counts, speech chec
   const done = await say('不加');
   assert.equal(done.handled, false);
   const prompt = done.handled ? '' : done.prompt ?? '';
-  assert.match(prompt, /each clip at most 15 s/);
+  assert.match(prompt, /clips of up to 15 s/);
   assert.doesNotMatch(prompt, /at most 30 s/, 'nothing planned above the new L');
 });
 
@@ -637,6 +657,215 @@ await test('single-clip wizard: a model change mid-wizard re-reads the lengths a
   const prompt = chosen.handled ? '' : chosen.prompt ?? '';
   assert.match(prompt, /duration: 15/);
   assert.match(prompt, new RegExp(`model "${SEEDANCE_20}"`), 'the clip is made with the model configured now');
+});
+
+/** Eight planned shots with a marker, a long action and a spoken line each (about 600 characters of text per shot). */
+function dialogueShots(extra: (index: number) => string = () => ''): Array<Record<string, unknown>> {
+  const natural = [6, 8, 5, 9, 7, 10, 6, 9];
+  const verbs = ['runs', 'leaps', 'pauses', 'climbs', 'turns', 'sprints', 'sits', 'looks up'];
+  return natural.map((duration, index) => ({
+    title: `Shot ${index + 1}`,
+    duration,
+    storyBeat: `MARK${index + 1}: 0–2s: Mira ${verbs[index]} through the rain-soaked market, her red scarf whipping in the wind as lanterns sway overhead and puddles shatter under her boots.${extra(index)} 2–4s: she glances back over her shoulder at the crowd, breath fogging in the cold air, one hand gripping the brass key on its cord. 4s–end: Mira says: “Line number ${index + 1}, we have to keep moving before the bell tower rings again.” She pushes on through the alley.`,
+    visualPrompt: `Rainy night market, neon reflections on wet cobblestones, Mira in a red scarf and long grey coat, shot ${index + 1}, shallow depth of field, anamorphic flare, 35mm lens, volumetric haze, lanterns swaying.`,
+    camera: index % 2 ? 'close-up handheld follow' : 'wide tracking dolly',
+  }));
+}
+
+function bodyTexts(requests: Parameters<typeof videoTaskBodies>[0]): string[] {
+  return videoTaskBodies(requests).map((body) => (body.content as Array<{ type: string; text?: string }>).filter((item) => item.type === 'text').map((item) => item.text ?? '').join('\n'));
+}
+
+await test('packed clips keep every shot: each marker and spoken line reaches the request (L=30 and L=15)', async () => {
+  const shots = dialogueShots();
+  const action = { prompt: 'Mira crosses a rainy night market.', story: 'Mira crosses a rainy night market.', totalDuration: 60, ratio: '16:9', generateAudio: true, identitySource: 'text_only', shots };
+  for (const [model, L, clips] of [[SEEDANCE_25, 30, 2], [SEEDANCE_20, 15, 4]] as const) {
+    const run = await runHermeticSaga(action, { videoModel: model });
+    assert.equal(run.result.ok, true, run.result.output);
+    const bodies = videoTaskBodies(run.requests);
+    assert.equal(bodies.length, clips, `L=${L}: ${bodies.map((body) => body.duration)}`);
+    assert.ok(bodies.every((body) => body.duration <= L));
+    const texts = bodyTexts(run.requests);
+    for (let shot = 1; shot <= 8; shot += 1) {
+      const holder = texts.findIndex((text) => text.includes(`MARK${shot}:`));
+      assert.ok(holder >= 0, `L=${L}: shot ${shot}'s marker reaches a request`);
+      assert.ok(texts[holder]!.includes(`Line number ${shot}, we have to keep moving before the bell tower rings again.`), `L=${L}: shot ${shot}'s line is in the same request`);
+    }
+    if (L === 30) assert.match(texts[0]!, /Shot 4 \(\d+–30s/, 'clip 1 holds four shots');
+  }
+
+  // No planned shots: a 30 s clip is three camera shots, all of them in the request.
+  const sentences = Array.from({ length: 24 }, (_, index) => `The kitten crosses street ${index + 1} in the rain, ducking under awnings and leaping over the gutters while neon signs flicker above the wet cobblestones.`);
+  const fallback = await runHermeticSaga(
+    { prompt: sentences.join(' '), totalDuration: 60, ratio: '16:9', generateAudio: false },
+    { videoModel: SEEDANCE_25 },
+  );
+  assert.equal(fallback.result.ok, true, fallback.result.output);
+  assert.deepEqual(videoTaskBodies(fallback.requests).map((body) => body.duration), [30, 30]);
+  for (const text of bodyTexts(fallback.requests)) {
+    assert.match(text, /3 camera shots joined by hard cuts/);
+    assert.match(text, /Shot 1 \(0–10s/);
+    assert.match(text, /Hard cut to Shot 2 \(10–20s/);
+    assert.match(text, /Hard cut to Shot 3 \(20–30s/, 'the third shot is not cut off');
+  }
+});
+
+await test('a packed clip opens on its first shot: keyframe and opening framing read only shot 1', async () => {
+  // Shots 2 and 5 move rightward; clip 1 opens on shot 1, clip 2 on shot 5.
+  const shots = [6, 8, 5, 9, 7, 10, 6, 9].map((duration, index) => ({
+    title: `Shot ${index + 1}`,
+    duration,
+    storyBeat: `MARK${index + 1}: Mira walks through the market.${index === 1 || index === 4 ? ' She is moving rightward across the frame.' : ''} Mira says: “Line ${index + 1}.”`,
+    camera: index % 2 ? 'close-up' : 'wide',
+  }));
+  const run = await runHermeticSaga(
+    { prompt: 'Mira crosses a rainy night market.', story: 'Mira crosses a rainy night market.', totalDuration: 60, ratio: '16:9', generateAudio: false, referenceImagePaths: [fixturePng()], shots },
+    { videoModel: SEEDANCE_25 },
+  );
+  assert.equal(run.result.ok, true, run.result.output);
+  assert.equal(videoTaskBodies(run.requests).length, 2);
+  const keyframes = imageBodies(run.requests).map((body) => JSON.stringify(body)).filter((text) => /MARK\d/.test(text));
+  assert.equal(keyframes.length, 2, 'one keyframe per clip');
+  assert.match(keyframes[0]!, /MARK1/);
+  assert.doesNotMatch(keyframes[0]!, /MARK[2-8]/, 'clip 1\'s keyframe shows shot 1 only');
+  assert.doesNotMatch(keyframes[0]!, /RIGHTWARD/, 'a later shot\'s direction is not the opening framing');
+  assert.match(keyframes[1]!, /MARK5/);
+  assert.doesNotMatch(keyframes[1]!, /MARK[1-46-8]/, 'clip 2\'s keyframe shows shot 5 only');
+  assert.match(keyframes[1]!, /RIGHTWARD/, 'the first shot\'s direction is');
+  const merged = packShotsIntoClips(shots, 30)[0]!.storyBeat ?? '';
+  assert.ok(extractOpeningFramingRegex({ storyBeat: merged, sourceStory: '', shotIndex: 1, shotCount: 2 }).some((cue) => /RIGHTWARD/.test(cue.text)), 'the whole clip would carry shot 2\'s cue');
+  assert.ok(!extractOpeningFramingRegex({ storyBeat: openingShotBeat(merged), sourceStory: '', shotIndex: 1, shotCount: 2 }).some((cue) => /RIGHTWARD/.test(cue.text)));
+});
+
+await test('no packing: cleanDirect, preserveUserScript, a Shot N script, or a model that does not cut inside a clip', async () => {
+  // Two short shots: one clip on L=30 when packed, two when kept as written.
+  const shots = dialogueShots().slice(0, 2);
+  const base = { prompt: 'Mira crosses a rainy night market.', story: 'Mira crosses a rainy night market.', totalDuration: 14, ratio: '16:9', generateAudio: false, identitySource: 'text_only', shots };
+  const packed = await runHermeticSaga(base, { videoModel: SEEDANCE_25 });
+  assert.deepEqual(videoTaskBodies(packed.requests).map((body) => body.duration), [14], 'packed when Artemis planned the shots');
+  for (const [label, action] of [
+    ['cleanDirect', { ...base, cleanDirect: true }],
+    ['preserveUserScript', { ...base, preserveUserScript: true }],
+    ['Shot N markers', { ...base, story: 'Shot 1: Mira runs. Shot 2: she leaps. Shot 3: she pauses.' }],
+    ['镜头N markers', { ...base, story: '镜头1：米拉奔跑。镜头2：她跳起。' }],
+    ['第N段 markers', { ...base, story: '第1段：米拉奔跑。第2段：她跳起。' }],
+  ] as const) {
+    const run = await runHermeticSaga(action, { videoModel: SEEDANCE_25 });
+    assert.equal(run.result.ok, true, `${label}: ${run.result.output}`);
+    assert.deepEqual(videoTaskBodies(run.requests).map((body) => body.duration), [6, 8], `${label}: one clip per written shot`);
+    assert.ok(bodyTexts(run.requests).every((text) => !/Hard cut to Shot 2/.test(text)), `${label}: no shots cut together`);
+  }
+  // Only the 2.x family cuts inside a clip; anything else does when the platform says so.
+  for (const id of [SEEDANCE_25, SEEDANCE_20, 'dreamina-seedance-2.0', 'dreamina-seedance-2.5']) assert.equal(resolveVideoModelProfile('byteplus', id).multiShot, true, id);
+  for (const id of ['seedance-1-0-lite-t2v-250428', 'seedance-1-0-pro-250528', 'seedance-1-5-pro-251215', 'wan2.6-i2v', 'some-other-video-model']) {
+    assert.equal(resolveVideoModelProfile('byteplus', id).multiShot, false, id);
+  }
+  assert.equal(resolveVideoModelProfile('byteplus', 'seedance-1-0-pro-250528', { multiShot: true }).multiShot, true, 'declared');
+  assert.equal(resolveVideoModelLimits('byteplus', 'seedance-1-0-lite-t2v-250428').multiShot, false);
+});
+
+await test('Saga plan prompt: a short or single-shot clip keeps the fewest equal shots (L=12, L=5, no multi-shot)', async () => {
+  for (const [label, capabilities, L] of [
+    ['L=12', { maxClipSeconds: 12 }, 12],
+    ['L=5', { maxClipSeconds: 5 }, 5],
+    ['single-shot model', { multiShot: false }, 15],
+  ] as const) {
+    const cwd = await workspace(SEEDANCE_20, capabilities);
+    const key = `plan-short-${label}`;
+    const say = (text: string, forceIntent = false) => handleSagaLongVideoWorkflow({ scope: 'cli', key, cwd, text, locale: 'zh-CN', forceIntent });
+    await say('一只小猫在雨夜的城市里冒险，最后在屋顶看日出', true);
+    await say('2');
+    await say('开始生成');
+    await say('1');
+    await say('1');
+    await say('60秒');
+    const done = await say('不加');
+    assert.equal(done.handled, false, label);
+    const prompt = done.handled ? '' : done.prompt ?? '';
+    const count = segmentCountFor(60, L);
+    assert.match(prompt, new RegExp(`Each shot is ONE generated clip of at most ${L} s\\. Use the fewest shots that fit: ${count} shots of roughly equal length for 60 s`), label);
+    assert.doesNotMatch(prompt, /SHOT LENGTHS|insert 4–6 s|packs consecutive shots/, `${label}: no natural-shot rules`);
+    assert.match(prompt, new RegExp(`each shot must be at most ${L} s`), label);
+  }
+});
+
+await test('packing: whole seconds, authored prompts, long shots split first, dialogue never squeezed out', () => {
+  // A shot above L is split before packing, so callers need not do it.
+  const long = packShotsIntoClips([
+    { title: 'a', duration: 40, storyBeat: 'One. Two. Three. Four.' },
+    { title: 'b', duration: 20, storyBeat: 'Five. Six.' },
+  ], 30);
+  assert.deepEqual(long.map((clip) => clip.duration), [30, 30]);
+  // Fractional lengths: whole-second shots and clips, the total kept.
+  const fractional = packShotsIntoClips([6.4, 8.3, 5.6, 9.7, 7.2, 10.1, 6.2, 6.5].map((duration, index) => ({ title: `s${index + 1}`, duration, storyBeat: `0–2s: beat ${index + 1}. 2s–end: more.` })), 30);
+  assert.equal(fractional.reduce((sum, clip) => sum + (clip.duration ?? 0), 0), 60);
+  assert.ok(fractional.every((clip) => Number.isInteger(clip.duration)));
+  for (const clip of fractional) {
+    for (const match of (clip.storyBeat ?? '').matchAll(/Shot \d+ \(([\d.]+)–([\d.]+)s/g)) {
+      assert.ok(Number.isInteger(Number(match[1])) && Number.isInteger(Number(match[2])), `whole-second shot ranges: ${match[0]}`);
+    }
+  }
+  // Only some shots authored: each authored prompt stays, in its own shot.
+  const mixed = packShotsIntoClips([
+    { title: 'a', duration: 8, storyBeat: 'beat a.', prompt: 'AUTHORED A prompt text.' },
+    { title: 'b', duration: 8, storyBeat: 'beat b.' },
+    { title: 'c', duration: 8, storyBeat: 'beat c.', prompt: 'AUTHORED C prompt text.' },
+  ], 30);
+  assert.equal(mixed.length, 1);
+  assert.equal(mixed[0]!.prompt, undefined);
+  assert.match(mixed[0]!.storyBeat ?? '', /Shot 1 \(0–8s\): AUTHORED A prompt text\. Hard cut to Shot 2 \(8–16s\): beat b\. Hard cut to Shot 3 \(16–24s\): AUTHORED C prompt text\./);
+  // Long beats: every shot keeps its marker and its line; the look lines go first.
+  const packed = packShotsIntoClips(dialogueShots() as Array<{ title: string; duration: number; storyBeat: string; visualPrompt: string; camera: string }>, 30);
+  for (const clip of packed) {
+    const beat = clip.storyBeat ?? '';
+    assert.ok(beat.length <= clipBeatBudget(clipBeatShotCount(beat)), `within the beat budget (${beat.length})`);
+    assert.doesNotMatch(beat, /\[Look:/);
+  }
+  const all = packed.map((clip) => clip.storyBeat).join(' ');
+  for (let shot = 1; shot <= 8; shot += 1) {
+    assert.match(all, new RegExp(`MARK${shot}:`));
+    assert.match(all, new RegExp(`“Line number ${shot}, we have to keep moving before the bell tower rings again\\.”`));
+  }
+  // Shots whose lines alone would not fit one clip's beat go to more clips rather than lose a line.
+  const talky = Array.from({ length: 6 }, (_, index) => ({ title: `t${index + 1}`, duration: 5, storyBeat: `Mira says: “${`Line ${index + 1} `.repeat(60).trim()}.” She waits.` }));
+  const talkyClips = packShotsIntoClips(talky, 30);
+  assert.ok(talkyClips.length > 1, 'more clips');
+  const talkyText = talkyClips.map((clip) => clip.storyBeat).join(' ');
+  for (let index = 1; index <= 6; index += 1) assert.ok(talkyText.includes(`${`Line ${index} `.repeat(60).trim()}.`), `line ${index} whole`);
+  // The opening frame of a clip is its first shot.
+  const first = packed[0]!;
+  assert.match(openingShotBeat(first.storyBeat ?? ''), /^MARK1:/);
+  assert.doesNotMatch(openingShotBeat(first.storyBeat ?? ''), /MARK2|Hard cut/);
+  assert.equal(openingShotCamera(first.camera ?? ''), 'wide tracking dolly');
+  assert.equal(openingShotCamera('slow dolly-in'), 'slow dolly-in');
+  // A beat already cut together is shortened shot by shot, never after its first shots.
+  const fitted = fitClipBeat(renderClipBeat([1, 2, 3].map((index) => ({ marker: `${index > 1 ? 'Hard cut to ' : ''}Shot ${index} (${(index - 1) * 10}–${index * 10}s): `, body: `${'A long action sentence about the scene. '.repeat(20)}Mira says: “Shot ${index} line.”`, look: `[Look: look ${index}]` }))), 900);
+  assert.ok(fitted.length <= 900, `${fitted.length}`);
+  for (const index of [1, 2, 3]) assert.match(fitted, new RegExp(`Shot ${index} \\(.*“Shot ${index} line\\.”`));
+});
+
+await test('single-clip wizard: any configured model replaces the old one mid-wizard, lengths clamped to its L', async () => {
+  const cwd = await workspace(SEEDANCE_25);
+  const key = 'single-clip-any-model';
+  const say = (text: string) => handleSeedanceMultimodalWorkflow({ scope: 'cli', key, cwd, text, locale: 'zh-CN' });
+  await say('生成一个赛博朋克产品发布视频');
+  const ask = await say('直接生成');
+  assert.match(ask.handled ? ask.reply : '', /5、10、15、20、30 秒/);
+  // A router-style 2.0 id, then a 12 s model: neither is the pinned 2.x id.
+  await configureVideo(cwd, 'dreamina-seedance-2.0');
+  const on20 = await say('30');
+  assert.equal(on20.handled, true, '30 s is not one clip on the router-style 2.0 id');
+  assert.match(on20.handled ? on20.reply : '', /4、5、10、15 秒/);
+  await configureVideo(cwd, 'seedance-1-5-pro-251215');
+  const on15 = await say('30');
+  assert.equal(on15.handled, true, '30 s is not one clip on the 12 s model');
+  assert.match(on15.handled ? on15.reply : '', /5、10、12 秒/);
+  const chosen = await say('12');
+  assert.equal(chosen.handled, false);
+  const prompt = chosen.handled ? '' : chosen.prompt ?? '';
+  assert.match(prompt, /model "seedance-1-5-pro-251215"/, 'the clip is made with the model configured now');
+  assert.match(prompt, /duration: 12/);
+  assert.doesNotMatch(prompt, /2-5|2\.5/, 'not the model the wizard started on');
 });
 
 console.log(`\n  ✔ ${passed} video duration checks passed`);

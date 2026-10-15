@@ -470,6 +470,8 @@ export type VideoCapabilityDeclaration = {
   referenceInputs?: Array<'image' | 'video' | 'audio'>;
   firstFrame?: boolean;
   canGenerateAudio?: boolean;
+  /** Cuts between several camera shots inside one clip when the prompt asks for it. */
+  multiShot?: boolean;
 };
 
 export type ImageGenerationParams = {

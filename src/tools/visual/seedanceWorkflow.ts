@@ -18,6 +18,7 @@ import {
   type NarrativeEntities,
 } from './sagaNarrative.js';
 import { isWorkflowSupportDiscussion } from './workflowIntent.js';
+import { resolveActiveVideoProfile } from './activeVideoModel.js';
 import { DEFAULT_UI_LOCALE, pickLocale, type UiLocale } from '../../cli/locale.js';
 
 export type SeedanceWorkflowScope = 'cli' | 'bridge';
@@ -544,15 +545,19 @@ async function multimodalVideoModel(cwd: string): Promise<{ model: string; clipC
 /**
  * The current video model and its clip lengths for a wizard in progress: the
  * model can change while the wizard waits (a new tier is synced into
- * providers.json), and the clip is made with the model configured now, never
- * longer than it renders.
+ * providers.json), and the clip is made with the model configured now,
+ * whatever it is, never longer than it renders. A length chosen earlier
+ * becomes the longest the new model offers that is not longer.
  */
 async function refreshClipModel(state: SeedanceWorkflowState): Promise<void> {
-  const current = await multimodalVideoModel(state.cwd).catch(() => undefined);
-  if (!current) return;
-  state.model = current.model;
-  state.clipChoices = current.clipChoices;
-  if (state.duration !== undefined) state.duration = Math.min(state.duration, Math.max(...current.clipChoices));
+  const profile = await resolveActiveVideoProfile(state.cwd).catch(() => undefined);
+  if (!profile?.model) return;
+  const choices = singleClipChoices(profile);
+  state.model = profile.model;
+  state.clipChoices = choices;
+  if (state.duration !== undefined && !choices.includes(state.duration)) {
+    state.duration = [...choices].reverse().find((value) => value <= state.duration!) ?? choices[0];
+  }
 }
 
 export async function handleSeedanceMultimodalWorkflow(

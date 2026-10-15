@@ -1374,7 +1374,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           referenceNotes: { type: 'array', description: 'Optional user notes describing supplied references, e.g. "this image is the character identity". Use them to set continuity; do not ignore them.', items: { type: 'string' } },
           shots: {
             type: 'array',
-            description: 'Optional structured shot list. Each shot may include title, duration, storyBeat, visualPrompt, camera, continuity, transition, transitionKind, prompt. Give each shot its natural length (about 4-15 s, by beat and dialogue), not the longest clip: consecutive shots are packed into as few generated clips as the video model allows, cut together inside each clip.',
+            description: 'Optional structured shot list. Each shot may include title, duration, storyBeat, visualPrompt, camera, continuity, transition, transitionKind, prompt. Give each shot its natural length (about 4-15 s, by beat and dialogue), not the longest clip: on a video model that cuts between shots inside a clip, consecutive shots are packed into as few generated clips as the length needs, cut together inside each clip; otherwise each shot is one clip.',
             items: { type: 'object' },
           },
           continuity: {

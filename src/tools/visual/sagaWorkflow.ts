@@ -26,7 +26,7 @@ import { extractBriefAspectRatio, normalizeAspectRatio } from './aspectRatio.js'
 import { extractSagaDialogueLines } from './sagaLanguageDirector.js';
 import { parseSagaBriefGlobals, stripBriefNoise } from './sagaBriefGlobals.js';
 import { resolveActiveVideoProfile } from './activeVideoModel.js';
-import { NATURAL_SHOT_MAX_SECONDS, segmentCountFor, splitLongShots } from './segmentPlan.js';
+import { NATURAL_SHOT_MAX_SECONDS, plansNaturalShots, segmentCountFor, splitLongShots } from './segmentPlan.js';
 import type { VideoModelProfile } from './videoCapabilities.js';
 
 export function resolveSagaWorkflowLocaleForTest(explicitLocale?: UiLocale): UiLocale {
@@ -107,6 +107,8 @@ type SagaWorkflowState = {
   /** L: the active video model's longest clip; segment plans and menus derive from it. */
   maxClipSeconds: number;
   minClipSeconds: number;
+  /** The video model cuts between camera shots inside one clip (videoCapabilities.ts). */
+  multiShot: boolean;
   // collected references
   referenceImageUrls: string[];
   referenceVideoUrls: string[];
@@ -1082,9 +1084,32 @@ function combinedStoryText(state: SagaWorkflowState): string {
 
 // ─── Replies ─────────────────────────────────────────────────────────────
 
-/** Longest shot the planner is asked to write: a natural shot length, within the model's clip. */
-function naturalShotMax(state: SagaWorkflowState): number {
-  return Math.max(state.minClipSeconds, Math.min(NATURAL_SHOT_MAX_SECONDS, state.maxClipSeconds));
+/**
+ * The planner's shot-length rules. On a model that cuts inside a clip of at
+ * least a natural shot's length, shots get their natural lengths and the
+ * pipeline packs them into about as many clips as the length takes; on any
+ * other model a shot is one clip, as few and as even as fit.
+ */
+function shotLengthRules(state: SagaWorkflowState, targetDuration: number): { lengths: string[]; durations: string } {
+  const L = state.maxClipSeconds;
+  const min = state.minClipSeconds;
+  const clips = segmentCountFor(targetDuration, L, min);
+  if (!plansNaturalShots({ multiShot: state.multiShot, maxClipSeconds: L })) {
+    return {
+      lengths: [
+        `    Each shot is ONE generated clip of at most ${L} s. Use the fewest shots that fit: ${clips} shot${clips === 1 ? '' : 's'} of roughly equal length for ${targetDuration} s. Inside a long shot, write several physical action beats on its timeline instead of holding one pose.`,
+      ],
+      durations: `10. DURATIONS — Shot durations must add up to the requested totalDuration; each shot must be at most ${L} s (a timecoded user segment that is longer is split by the pipeline, never shortened).`,
+    };
+  }
+  const longest = Math.min(NATURAL_SHOT_MAX_SECONDS, L);
+  return {
+    lengths: [
+      `    SHOT LENGTHS — Cut like an editor, not by the clock: each shot is one camera set-up sized to its beat, usually ${min}–${longest} s (a quick reaction or insert ${min}–6 s, an action or a line of dialogue 6–10 s, a long exchange or a slow reveal up to ${longest} s). A spoken line needs about 1 s per ${CHINESE_CHARS_PER_SECOND} Chinese characters or ${ENGLISH_WORDS_PER_SECOND} English words, plus a moment to react. Never pad a shot to fill a clip, and never write a shot longer than ${L} s or shorter than ${min} s.`,
+      `    The pipeline packs consecutive shots into generated clips of up to ${L} s with hard cuts inside them, ${clips} clip${clips === 1 ? '' : 's'} for ${targetDuration} s; a shot that crosses a clip boundary continues in the next clip. A shot whose transitionKind is not "cut" starts a new clip. Keep each character's look identical in every shot.`,
+    ],
+    durations: `10. DURATIONS — Shot durations must add up to the requested totalDuration; each shot is ${min}–${L} s, usually no more than ${longest} s (a timecoded user segment longer than ${L} s is split by the pipeline, never shortened).`,
+  };
 }
 
 function buildModelLine(state: SagaWorkflowState): string {
@@ -1733,6 +1758,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
   // (like "真人") get mapped to safe equivalents that preserve meaning.
   const fullStory = sanitizeForVideoProvider(combinedStoryText(state));
   const targetDuration = clampDuration(state.targetDuration ?? state.prefilledDuration) ?? estimateDuration(fullStory);
+  const shotRules = shotLengthRules(state, targetDuration);
   const ratio = state.ratio ?? state.suggestedRatio ?? extractRatio(fullStory) ?? '16:9';
   const projectId = `video-${Date.now()}`;
   const sanitizedAccumulated = state.accumulatedStory.map((s) => sanitizeForVideoProvider(s));
@@ -1838,8 +1864,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     '    Action verbs (use these — not "stands", "is", "looks"): walks, steps, turns, lifts, reaches, drops, catches, leaps, kneels, scatters, spins, opens, closes, pushes, pulls, rises, descends, glides, twirls, summons, releases, shatters.',
     '    Always include continuous environmental motion when the story actually contains moving elements: hair tossed by wind, fabric/cape flowing, particles drifting, rain streaks, fog rolling, light flickering, water rippling, dust motes, leaves falling, fireflies, mist rising, smoke curling. Do not force camera motion or background motion when the user explicitly locks the camera or wants a static tableau. In multi-city walking scenes, keep the camera stable and let only the subject and environment move naturally.',
     '    Always describe at least ONE deliberate body movement per ~3 s of clip duration — never let a shot be a single static pose.',
-    `    SHOT LENGTHS — Cut like an editor, not by the clock: each shot is one camera set-up sized to its beat, usually ${state.minClipSeconds}–${naturalShotMax(state)} s (a quick reaction or insert ${state.minClipSeconds}–6 s, an action or a line of dialogue 6–10 s, a long exchange or a slow reveal up to ${naturalShotMax(state)} s). A spoken line needs about 1 s per ${CHINESE_CHARS_PER_SECOND} Chinese characters or ${ENGLISH_WORDS_PER_SECOND} English words, plus a moment to react. Never pad a shot to fill a clip, and never write a shot longer than ${state.maxClipSeconds} s or shorter than ${state.minClipSeconds} s.`,
-    `    The pipeline packs consecutive shots into as few generated clips as fit, each clip at most ${state.maxClipSeconds} s with hard cuts inside it (about ${segmentCountFor(targetDuration, state.maxClipSeconds, state.minClipSeconds)} clip(s) for ${targetDuration} s); a shot whose transitionKind is not "cut" starts a new clip. Keep each character's look identical in every shot.`,
+    ...shotRules.lengths,
     '    storyBeat may NOT be: identity-preservation rules, generic continuity language, or "the character stands/sits/looks" with no movement. The pipeline rejects boilerplate storyBeats and falls back to story chunks.',
     '4. CINEMATIC VOCABULARY — Use industry terms (35mm/50mm lens, golden hour, volumetric beams, ray-traced reflections, IMAX 70mm grain, Arri Alexa LogC). For camera, prefer ACTIVE camera language: tracking shot, dolly-in, dolly-out, crane down, gimbal arc, whip pan, snorricam, handheld follow, parallax push. Avoid "locked-off" / "static" / "establishing only" unless the scene is genuinely meant to be still.',
     '5. HEAD/TAIL VISUAL ECHO — Write each shot N\'s `transition` as a concrete description of its closing frame (in mid-action, not a freeze); open shot N+1\'s `visualPrompt` with a matching opening-frame description that visually rhymes. The body momentum, gaze/covered-face direction, hair/fabric flow, and camera direction should continue across the cut so the transition feels alive rather than mechanical.',
@@ -1854,7 +1879,7 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     '7. SCENE-PRIORITY — storyBeat dominates the full clip duration; transition field describes only the closing 0.5 s.',
     '8. PHYSICS & FAILURE GUARDS — The aesthetic lock auto-appends physics anchors (no morphing/flickering/melting, anatomically correct).',
     '9. SCENE-JUMP HANDLING — When the story has a hard location jump, insert at least one transition shot that bridges the two locations through a shared visual element.',
-    `10. DURATIONS — Shot durations must add up to the requested totalDuration; each shot is ${state.minClipSeconds}–${state.maxClipSeconds} s, usually no more than ${naturalShotMax(state)} s (a timecoded user segment longer than ${state.maxClipSeconds} s is split by the pipeline, never shortened).`,
+    shotRules.durations,
     `11. SUBTITLE MODE — User selected ${state.subtitleMode ?? 'auto'}: ${state.subtitleMode === 'always' ? 'render readable subtitles/captions for dialogue and voiceover, preserving original text/language.' : state.subtitleMode === 'off' ? 'do not render dialogue as on-screen subtitles; keep dialogue as audio/lip-sync unless the user explicitly authored a subtitle line.' : 'only add subtitles/on-screen text when the user explicitly requested them.'}`,
   );
 
@@ -2000,6 +2025,7 @@ function newState(input: SagaWorkflowInput, profile: VideoModelProfile): SagaWor
     multimodalCapable,
     maxClipSeconds: profile.maxClipSeconds,
     minClipSeconds: profile.minClipSeconds,
+    multiShot: profile.multiShot,
     referenceImageUrls: [],
     storyboardImageUrls: [],
     referenceVideoUrls: [],
@@ -2031,6 +2057,7 @@ function newState(input: SagaWorkflowInput, profile: VideoModelProfile): SagaWor
 async function refreshClipLimits(state: SagaWorkflowState): Promise<string | undefined> {
   const profile = await resolveActiveVideoProfile(state.cwd).catch(() => undefined);
   if (!profile) return undefined;
+  state.multiShot = profile.multiShot;
   if (profile.maxClipSeconds === state.maxClipSeconds && profile.minClipSeconds === state.minClipSeconds) return undefined;
   const previous = state.maxClipSeconds;
   state.maxClipSeconds = profile.maxClipSeconds;

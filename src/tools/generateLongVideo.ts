@@ -64,7 +64,19 @@ import {
   renderSagaProject,
 } from './visual/sagaRenderer/index.js';
 import { extractOpeningFramingRegex, formatOpeningFramingBlock } from './visual/sagaFraming.js';
-import { naturalShotLengths, packShotsIntoClips, planSegmentDurations, splitBeatText, splitLongShots } from './visual/segmentPlan.js';
+import {
+  clipBeatBudget,
+  fitClipBeat,
+  naturalShotLengths,
+  openingShotBeat,
+  openingShotCamera,
+  packShotsIntoClips,
+  planSegmentDurations,
+  renderClipBeat,
+  splitBeatText,
+  splitLongShots,
+  type ClipShotPart,
+} from './visual/segmentPlan.js';
 import { videoCapabilityOverridesFromConfig } from './visual/videoCapabilities.js';
 import type { SagaBriefGlobals } from './visual/sagaBriefGlobals.js';
 import { formatGlobalBriefExcerpt, parseSagaBriefGlobals, stripBriefNoise, worldAnchorLinesFor } from './visual/sagaBriefGlobals.js';
@@ -812,21 +824,23 @@ function motionTimelineFor(storyChunk: string, duration: number, index: number, 
 // is cut like a scene (wide, closer, reaction) instead of one held take.
 const FALLBACK_SHOT_FRAMINGS = ['wide establishing shot', 'medium tracking shot', 'close-up on the action', 'over-the-shoulder reverse shot', 'low-angle follow shot'];
 
-function buildMotionTimelineFallback(storyChunk: string, duration: number, index: number): string {
-  // A clip longer than a natural shot is several camera shots cut together
-  // inside the clip, each with its slice of the story.
-  const shots = naturalShotLengths(duration);
+function buildMotionTimelineFallback(storyChunk: string, duration: number, index: number, multiShot: boolean): string {
+  // On a model that cuts inside a clip, a clip longer than a natural shot is
+  // several camera shots cut together, each with its slice of the story
+  // first and its motion after it, shortened shot by shot to fit.
+  const shots = multiShot ? naturalShotLengths(duration) : [duration];
   if (shots.length <= 1) return motionTimelineFor(storyChunk, duration, index);
-  const slices = splitBeatText(storyChunk, shots.length);
+  const slices = splitBeatText(storyChunk, shots.length, shots);
   let cursor = 0;
-  const parts = shots.map((seconds, shotIndex) => {
+  const parts: ClipShotPart[] = shots.map((seconds, shotIndex) => {
     const start = cursor;
     cursor += seconds;
     const framing = FALLBACK_SHOT_FRAMINGS[(index + shotIndex) % FALLBACK_SHOT_FRAMINGS.length]!;
     const slice = (slices[shotIndex] ?? storyChunk).replace(/^Continue the same moment[^:]*:\s*/, '');
-    return `${shotIndex > 0 ? 'Hard cut to ' : ''}Shot ${shotIndex + 1} (${start}–${cursor}s, ${framing}): ${motionTimelineFor(slice, seconds, index + shotIndex, start)}`;
+    const motion = motionTimelineFor('', seconds, index + shotIndex, start).replace(/\s*Scene intent:\s*$/, '');
+    return { marker: `${shotIndex > 0 ? 'Hard cut to ' : ''}Shot ${shotIndex + 1} (${start}–${cursor}s, ${framing}): `, body: `${slice} ${motion}` };
   });
-  return [`One clip of ${shots.length} camera shots joined by hard cuts inside the clip; the same characters, wardrobe, props, place and light carry across every cut.`, ...parts].join(' ');
+  return fitClipBeat(renderClipBeat(parts), clipBeatBudget(parts.length));
 }
 
 /** Where each segment starts on the timeline: its timecode when it has one, else after the previous one. */
@@ -870,8 +884,9 @@ function segmentPromptExtras(options: {
   // top of the video-model prompt so the model attends to "画面左 5% /
   // PROFILE / RIGHTWARD / 中景全身 / locked-off tripod" instead of defaulting
   // to a centered, half-body, walking-treadmill shot.
+  // A clip of several camera shots opens on its first shot.
   const framingDirectives = extractOpeningFramingRegex({
-    storyBeat: options.storyBeat,
+    storyBeat: openingShotBeat(options.storyBeat),
     sourceStory: options.story,
     shotIndex: options.shotIndex,
     shotCount: options.shotCount,
@@ -908,6 +923,8 @@ function buildSegments(options: {
   /** Longest compiled segment prompt (the model limit less what generate_video adds). */
   promptMaxChars?: number;
   promptOptions?: SegmentPromptOptions;
+  /** The model cuts between camera shots inside a clip and the script is Artemis's own to shape. */
+  multiShot?: boolean;
 }): SagaSegment[] {
   const beats = sentenceChunks(options.story);
   const plannedShots = Array.isArray(options.shots)
@@ -970,7 +987,7 @@ function buildSegments(options: {
     // becomes the dominant signal exactly as intended.
     const storyBeatFallback = options.cleanDirect
       ? trimToSentenceBoundary(storyChunkFallback || options.story, 1800)
-      : buildMotionTimelineFallback(storyChunkFallback, duration, index);
+      : buildMotionTimelineFallback(storyChunkFallback, duration, index, options.multiShot === true);
     const storyBeat = sanitizeInline(rawPlannedStoryBeat, storyBeatFallback);
     const title = sanitizeInline(planned?.title, `Shot ${index + 1}`);
     const rawPlannedVisualPrompt = looksLikeIdentityRuleBoilerplate(planned?.visualPrompt) ? undefined : planned?.visualPrompt;
@@ -1799,6 +1816,10 @@ export async function executeGenerateLongVideo(
       userOverride: userContinuityOverride,
     });
 
+    // A script the user wrote is kept as written (no story rewrite, no shots
+    // packed into shared clips).
+    const preserveUserScript = rawPassthrough || shouldPreserveUserScriptWithoutCriticRewrite({ action, timestampedStoryShots });
+    const multiShotClips = limits.multiShot && !preserveUserScript;
     // Sanitize per-shot author-facing fields (storyBeat / visualPrompt /
     // camera / continuity / transition / prompt). Story itself was already
     // sanitized before continuityBible was built.
@@ -1810,14 +1831,15 @@ export async function executeGenerateLongVideo(
       if (storyboardShots.length > before) {
         toolLog(`✂️ 有 ${storyboardShots.length - before} 个镜头超过单段上限 ${limits.maxSegmentSeconds} 秒，已按句子拆成更短的连续段落（共 ${storyboardShots.length} 段）。`);
       }
-      // Planned shots keep their natural lengths; consecutive ones share a
-      // generated clip (cut inside it) up to the model's longest clip, so a
-      // longer clip means fewer clips, not longer shots. A timeline the user
-      // wrote keeps one clip per written segment, and a raw passthrough
-      // script goes out as written.
-      if (timestampedStoryShots.length < 2 && !rawPassthrough) {
+      // Planned shots keep their natural lengths; on a model that cuts
+      // inside a clip, consecutive ones share a generated clip up to its
+      // longest, so a longer clip means fewer clips, not longer shots. A
+      // script the user wrote (a timeline, Shot N / 镜头N markers, or
+      // preserveUserScript) keeps one clip per written segment, and a
+      // cleanDirect or raw passthrough script goes out as written.
+      if (multiShotClips && !verbatimSegments) {
         const shotCount = storyboardShots.length;
-        storyboardShots = packShotsIntoClips(storyboardShots, limits.maxSegmentSeconds);
+        storyboardShots = packShotsIntoClips(storyboardShots, limits.maxSegmentSeconds, limits.minSegmentSeconds);
         if (storyboardShots.length < shotCount) {
           toolLog(`🎞️ ${shotCount} 个镜头合并为 ${storyboardShots.length} 段生成（每段最长 ${limits.maxSegmentSeconds} 秒，段内按镜头切换）。`);
         }
@@ -1848,6 +1870,7 @@ export async function executeGenerateLongVideo(
       briefGlobals,
       promptMaxChars: segmentPromptMaxChars,
       promptOptions: segmentPromptOptions,
+      multiShot: multiShotClips,
     });
     superVisualImageBudget.raiseLimit(superVisualImageLimit(segments.length));
     const segmentStarts = segmentStartSeconds(segments.map((segment, index) => ({ duration: segment.duration, timecodeStart: sanitizedShots?.[index]?.timecodeStart })));
@@ -1861,7 +1884,6 @@ export async function executeGenerateLongVideo(
     let preCriticViolations: ShotViolation[] = [];
     let postCriticViolations: ShotViolation[] = [];
     const rewroteShotIndices: number[] = [];
-    const preserveUserScript = rawPassthrough || shouldPreserveUserScriptWithoutCriticRewrite({ action, timestampedStoryShots });
     if (narrativeEntities && !rawPassthrough) {
       toolLog(`🧠 剧情检查：开始逐镜头核对（mode=${narrativeEntities.mode} · 主角=${narrativeEntities.protagonist.name}）...`);
       preCriticViolations = runNarrativeCritic({
@@ -2139,11 +2161,13 @@ export async function executeGenerateLongVideo(
             ratio,
             shotIndex: segment.index,
             shotCount: segments.length,
+            // The keyframe is the clip's opening frame: its first shot.
             shot: {
               title: segment.title,
-              storyBeat: segment.storyBeat,
-              visualPrompt: segment.visualPrompt,
-              camera: segment.camera,
+              storyBeat: openingShotBeat(segment.storyBeat),
+              // A visual direction made from the beat shows its first shot too.
+              visualPrompt: segment.visualPrompt.replace(segment.storyBeat, () => openingShotBeat(segment.storyBeat)),
+              camera: openingShotCamera(segment.camera),
               continuity: segment.continuity,
             },
             turnaroundPath: superVisualMode.referenceImagePath,
