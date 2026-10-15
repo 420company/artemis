@@ -783,7 +783,9 @@ function pickJsonRpcResponseForId(
 ): JsonRecord | undefined {
   const entries = Array.isArray(payload) ? payload : [payload];
   for (const entry of entries) {
-    if (!isRecord(entry) || entry.id === undefined) {
+    // A message with a method is a server request, never our response, even
+    // when its id happens to equal the id of our call.
+    if (!isRecord(entry) || entry.id === undefined || entry.method !== undefined) {
       continue;
     }
     if (String(entry.id) === requestId) {
@@ -1271,12 +1273,12 @@ class SseRpcTransport implements RpcTransport {
 
       if (
         typeof entry.method === 'string' &&
-        (typeof entry.id === 'string' || typeof entry.id === 'number') &&
-        !this.pending.has(String(entry.id))
+        (typeof entry.id === 'string' || typeof entry.id === 'number')
       ) {
-        // A server-initiated request (sampling/createMessage,
+        // A server-initiated request (ping, sampling/createMessage,
         // elicitation/create, ...) arriving on the SSE stream: route it and
-        // POST the JSON-RPC reply to the message endpoint.
+        // POST the JSON-RPC reply to the message endpoint. A message with a
+        // method is always a request, even when its id equals one of ours.
         // (Previously these were silently dropped.)
         void this.respondToServerRequest(entry.id, entry.method, entry.params);
         continue;
@@ -2092,12 +2094,12 @@ class StdioRpcTransport implements RpcTransport {
 
       if (
         typeof payload.method === 'string' &&
-        (typeof payload.id === 'string' || typeof payload.id === 'number') &&
-        (typeof payload.id !== 'number' || !this.pending.has(payload.id))
+        (typeof payload.id === 'string' || typeof payload.id === 'number')
       ) {
-        // A server-initiated request (sampling/createMessage,
-        // elicitation/create, ...): it has a method and an id, but matches
-        // none of our in-flight calls. Route it and reply on the pipe.
+        // A server-initiated request (ping, sampling/createMessage,
+        // elicitation/create, ...): it has a method and an id. It is a
+        // request even when its id equals one of our in-flight calls (ids are
+        // per direction). Route it and reply on the pipe.
         // (Previously these were silently dropped.)
         void this.handleServerRequest(payload.id, payload.method, payload.params);
         continue;

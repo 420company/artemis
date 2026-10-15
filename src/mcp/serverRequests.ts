@@ -740,6 +740,7 @@ function validateSamplingResult(value: unknown): McpSamplingResult | undefined {
 // Router
 // ---------------------------------------------------------------------------
 
+export const MCP_PING_METHOD = 'ping';
 export const MCP_SAMPLING_METHOD = 'sampling/createMessage';
 export const MCP_ELICITATION_METHOD = 'elicitation/create';
 
@@ -880,6 +881,10 @@ export class McpServerRequestRouter {
     params: unknown,
     ctx: McpServerRequestContext,
   ): Promise<RoutedOk | RoutedError> {
+    // A liveness check: answered at once with an empty result, outside the limits.
+    if (method === MCP_PING_METHOD) {
+      return { result: {} };
+    }
     if (method !== MCP_SAMPLING_METHOD && method !== MCP_ELICITATION_METHOD) {
       return {
         error: {
