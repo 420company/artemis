@@ -39,6 +39,15 @@ export type ProviderConfig = {
    */
   gatewayBridgesImages?: boolean;
   /**
+   * Set by the agent server on profiles that point at the platform gateway
+   * while the gateway takes prompt cache marks: requests then mark where
+   * their stable part ends (`cache_control` on the last content part of the
+   * system message and of the newest stored message), and the gateway turns
+   * the marks into the upstream's own breakpoints or removes them. Also for
+   * an OpenAI-compatible endpoint of the owner's that takes such marks.
+   */
+  promptCacheMarks?: boolean;
+  /**
    * Largest response the model can produce, in tokens. Only used when
    * capabilitiesSource is 'platform'; it then replaces the name-based
    * max_tokens defaults.
