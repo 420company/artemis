@@ -2354,23 +2354,30 @@ async function thinkOptionsToRunAgentOptions(
     if (options.selfCheck !== undefined) {
         runOptions.selfCheck = options.selfCheck;
     }
-    // onToolCall/onToolResult are assumed to exist on RunAgentOptions. Object.assign
-    // keeps this compiling even if the declared shape differs.
-    const toolHooks: { onToolCall?: (name: any, args: any) => void; onToolResult?: (name: any, ok: any, output: any) => void } = {};
-    if (options.onToolCall) toolHooks.onToolCall = options.onToolCall;
-    if (options.onToolResult) toolHooks.onToolResult = options.onToolResult;
-    Object.assign(runOptions, toolHooks);
+    // A stop from the caller stops the run.
+    if (options.abortSignal) runOptions.abortSignal = options.abortSignal;
+    // runAgent reports tools through onInfo: the `[tool:<name>] …` lines go to
+    // the caller's tool log (as the legacy path's tool lines do), and the
+    // start/end events to onToolCall/onToolResult.
+    runOptions.onInfo = (message, event) => {
+        try {
+            if (message.startsWith('[tool:')) options.onToolLog?.(message, event?.type === 'tool_end' && event.status !== 'ok' ? 'warn' : 'info');
+            if (event?.type === 'tool_start') options.onToolCall?.(event.tool, event.detail ? { detail: event.detail } : {});
+            if (event?.type === 'tool_end') options.onToolResult?.(event.tool, event.status === 'ok', event.summary ?? '');
+        } catch {
+            // A listener error must not break the turn.
+        }
+    };
 
     // getSession(cwd) is this module's singleton (cwd is only used on first creation).
     // Legacy thinkTurn uses the same singleton, so the seeded history matches.
     const seed: any[] = [...getSession(effectiveCwd).getMessages()];
-    // Assumption: id and messages are the only fields runAgent relies on here. Any
-    // other required SessionRecord fields are unknown at this layer, hence the
-    // targeted assertion.
-    const sessionRecord = {
-        id: `brain-adapter-${Date.now()}`,
+    // A complete session record (runAgent reads cwd, plan, tasks and the
+    // other lists), seeded with the legacy history; it is not saved as such.
+    const sessionRecord: AdapterSessionRecord = {
+        ...sessionStore.createSession({ title: 'think' }),
         messages: seed,
-    } as unknown as AdapterSessionRecord;
+    };
 
     return { runOptions, sessionRecord, permissionManager };
 }
