@@ -10,11 +10,13 @@
 import { copyFile, mkdir, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, statSync } from 'node:fs'
+import { devNull, tmpdir } from 'node:os'
 import { promisify } from 'node:util'
-import { resolve as pathResolve, join, basename, extname, dirname } from 'node:path'
+import path, { resolve as pathResolve, join, basename, extname, dirname } from 'node:path'
 import { lookup as dnsLookup } from 'node:dns/promises'
-import { ensureNotSensitivePath, resolveInsideRoot } from '../utils/fs.js'
+import { ensureNotGitControlPath, ensureNotSensitivePath, resolveInsideRoot } from '../utils/fs.js'
+import { AssetDownloadError, downloadGuardedUrl, guardedRequest } from './visual/safeDownload.js'
 import { resolveWorkspaceCandidatePath } from '../utils/workspaceRoots.js'
 import { 
   execNotebookCreate, execNotebookList, execNotebookUpdate, execNotebookDelete, 
@@ -28,9 +30,46 @@ const execFileAsync = promisify(execFile)
 
 type TR = { ok: boolean; output: string }
 
+/**
+ * Windows: the absolute path of `name` from PATH, never from the working
+ * directory (Windows would otherwise look there first, so a planted git.exe
+ * in the workspace would run). Relative PATH entries are skipped; only .exe
+ * and .com run without a shell. Undefined when not found.
+ */
+export function resolveWindowsProgram(
+  name: string,
+  env: { path?: string; cwd: string; exists?: (file: string) => boolean },
+): string | undefined {
+  const win = path.win32
+  if (win.isAbsolute(name)) return name
+  const exists = env.exists ?? ((file: string) => {
+    try { return statSync(file).isFile() } catch { return false }
+  })
+  const cwd = win.resolve(env.cwd).toLowerCase()
+  const extensions = win.extname(name) ? [''] : ['.exe', '.com']
+  for (const raw of (env.path ?? '').split(';')) {
+    const entry = raw.trim().replace(/^"|"$/g, '')
+    if (!entry || !win.isAbsolute(entry) || win.resolve(entry).toLowerCase() === cwd) continue
+    for (const ext of extensions) {
+      const candidate = win.join(entry, `${name}${ext}`)
+      if (exists(candidate)) return candidate
+    }
+  }
+  return undefined
+}
+
 /** Run a program with an argv array (never through a shell). */
 async function runFile(file: string, args: readonly string[], cwd: string, timeout: number): Promise<{ stdout: string; stderr: string }> {
-  const { stdout, stderr } = await execFileAsync(file, [...args], { cwd, timeout, maxBuffer: 10 * 1024 * 1024, windowsHide: true })
+  let program = file
+  let env: NodeJS.ProcessEnv | undefined
+  if (process.platform === 'win32') {
+    const resolved = resolveWindowsProgram(file, { path: process.env.PATH ?? process.env.Path, cwd })
+    if (!resolved) throw new Error(`${file}: not found on PATH`)
+    program = resolved
+    // cmd.exe (npm/npx shims) and the program itself never search the working directory either.
+    env = { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' }
+  }
+  const { stdout, stderr } = await execFileAsync(program, [...args], { cwd, timeout, maxBuffer: 10 * 1024 * 1024, windowsHide: true, ...(env ? { env } : {}) })
   return { stdout: String(stdout), stderr: String(stderr) }
 }
 
@@ -71,18 +110,89 @@ function guardPath(cwd: string, inputPath: string, permissionMode?: 'ask' | 'ful
   }
 }
 
+/** Write tools: guardPath, and never git's own config, hooks or attributes (any mode). */
+function guardWritePath(cwd: string, inputPath: string, permissionMode?: 'ask' | 'full-access' | 'read' | 'write'): { ok: true; absolute: string } | { ok: false; output: string } {
+  const g = guardPath(cwd, inputPath, permissionMode)
+  if (!g.ok) return g
+  try {
+    ensureNotGitControlPath(g.absolute, inputPath)
+    return g
+  } catch (e) {
+    return { ok: false, output: String(e instanceof Error ? e.message : e) }
+  }
+}
+
+// ── Git without the repository's code ─────────────────────────────────────────
+// A repository's config can make git run programs: hooks, core.fsmonitor,
+// diff.external and textconv drivers, filter drivers. The git extras run with
+// all of those switched off, so they never run code from the workspace.
+
+let emptyHooksDir: string | undefined
+function noHooksDir(): string {
+  if (!emptyHooksDir || !existsSync(emptyHooksDir)) emptyHooksDir = mkdtempSync(join(tmpdir(), 'artemis-no-hooks-'))
+  return emptyHooksDir
+}
+
+/** `-c` options that keep git from running anything the repository configures. */
+export function gitSafetyOptions(filterDrivers: readonly string[] = []): string[] {
+  const options = [
+    '-c', 'core.fsmonitor=false',
+    '-c', `core.hooksPath=${noHooksDir()}`,
+    '-c', 'diff.external=',
+    '-c', `core.attributesFile=${devNull}`,
+  ]
+  for (const name of filterDrivers) {
+    for (const key of ['clean', 'smudge', 'process']) options.push('-c', `filter.${name}.${key}=`)
+    options.push('-c', `filter.${name}.required=false`)
+  }
+  return options
+}
+
+/**
+ * Names of the filter drivers (filter.<name>.clean|smudge|process) the
+ * repository's own config declares (local and worktree scope, includes
+ * followed): files in the workspace that anything with write access to it
+ * can plant. Drivers the owner installed in their global or system config
+ * (git-lfs) are the owner's own programs and stay as they are.
+ */
+async function gitRepoFilterDrivers(cwd: string): Promise<string[]> {
+  try {
+    const { stdout } = await runFile('git', [...gitSafetyOptions(), 'config', '--includes', '--show-scope', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'], cwd, 5_000)
+    const names = stdout.split('\n')
+      .map((line) => line.trim().split('\t'))
+      .filter(([scope, key]) => key && (scope === 'local' || scope === 'worktree'))
+      .map(([, key]) => key!.slice('filter.'.length, key!.lastIndexOf('.')))
+    return [...new Set(names)].filter(Boolean)
+  } catch {
+    return [] // exit 1: none declared
+  }
+}
+
 async function isGitRepository(cwd: string): Promise<boolean> {
   try {
-    const { stdout } = await runFile('git', ['rev-parse', '--is-inside-work-tree'], cwd, 5_000)
+    const { stdout } = await runFile('git', [...gitSafetyOptions(), 'rev-parse', '--is-inside-work-tree'], cwd, 5_000)
     return stdout.trim() === 'true'
   } catch {
     return false
   }
 }
 
-async function gitRun(args: readonly string[], cwd: string): Promise<TR> {
+/**
+ * Runs git with the safety options; the repository's own filter drivers are
+ * switched off. `writesContent` (add, checkout): with such a driver declared,
+ * the switched-off driver would store or check out the wrong content, so
+ * those are refused instead.
+ */
+async function gitRun(args: readonly string[], cwd: string, options: { writesContent?: boolean } = {}): Promise<TR> {
   try {
-    const { stdout, stderr } = await runFile('git', args, cwd, 15_000)
+    const drivers = await gitRepoFilterDrivers(cwd)
+    if (options.writesContent && drivers.length > 0) {
+      return {
+        ok: false,
+        output: `This repository's own git config declares filter drivers (${drivers.join(', ')}), which run programs. git ${args[0]} is not run from this tool; use run_command so the owner sees the exact command.`,
+      }
+    }
+    const { stdout, stderr } = await runFile('git', [...gitSafetyOptions(drivers), ...args], cwd, 15_000)
     const out = (stdout + (stderr ? `\n[stderr]\n${stderr}` : '')).trim()
     return { ok: true, output: out || '(no output)' }
   } catch (e: unknown) {
@@ -94,16 +204,16 @@ async function gitRun(args: readonly string[], cwd: string): Promise<TR> {
 // ── File System ───────────────────────────────────────────────────────────────
 
 export async function execDeleteFile(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'full-access' | 'read' | 'write'): Promise<TR> {
-  const g = guardPath(cwd, String(inp.path ?? ''), permissionMode)
+  const g = guardWritePath(cwd, String(inp.path ?? ''), permissionMode)
   if (!g.ok) return g
   try { await unlink(g.absolute); return { ok: true, output: `Deleted: ${g.absolute}` } }
   catch (e) { return { ok: false, output: String(e) } }
 }
 
 export async function execMoveFile(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'full-access' | 'read' | 'write'): Promise<TR> {
-  const gs = guardPath(cwd, String(inp.from ?? ''), permissionMode)
+  const gs = guardWritePath(cwd, String(inp.from ?? ''), permissionMode)
   if (!gs.ok) return gs
-  const gd = guardPath(cwd, String(inp.to ?? ''), permissionMode)
+  const gd = guardWritePath(cwd, String(inp.to ?? ''), permissionMode)
   if (!gd.ok) return gd
   try { await rename(gs.absolute, gd.absolute); return { ok: true, output: `Moved: ${gs.absolute} → ${gd.absolute}` } }
   catch (e) { return { ok: false, output: String(e) } }
@@ -112,21 +222,21 @@ export async function execMoveFile(inp: Record<string, unknown>, cwd: string, pe
 export async function execCopyFile(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'full-access' | 'read' | 'write'): Promise<TR> {
   const gs = guardPath(cwd, String(inp.from ?? ''), permissionMode)
   if (!gs.ok) return gs
-  const gd = guardPath(cwd, String(inp.to ?? ''), permissionMode)
+  const gd = guardWritePath(cwd, String(inp.to ?? ''), permissionMode)
   if (!gd.ok) return gd
   try { await copyFile(gs.absolute, gd.absolute); return { ok: true, output: `Copied: ${gs.absolute} → ${gd.absolute}` } }
   catch (e) { return { ok: false, output: String(e) } }
 }
 
 export async function execCreateDirectory(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'full-access' | 'read' | 'write'): Promise<TR> {
-  const g = guardPath(cwd, String(inp.path ?? ''), permissionMode)
+  const g = guardWritePath(cwd, String(inp.path ?? ''), permissionMode)
   if (!g.ok) return g
   try { await mkdir(g.absolute, { recursive: true }); return { ok: true, output: `Created directory: ${g.absolute}` } }
   catch (e) { return { ok: false, output: String(e) } }
 }
 
 export async function execDeleteDirectory(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'full-access' | 'read' | 'write'): Promise<TR> {
-  const g = guardPath(cwd, String(inp.path ?? ''), permissionMode)
+  const g = guardWritePath(cwd, String(inp.path ?? ''), permissionMode)
   if (!g.ok) return g
   const force = inp.force === true
   try {
@@ -172,7 +282,7 @@ export async function execGitDiff(inp: Record<string, unknown>, cwd: string): Pr
   if (!(await isGitRepository(cwd))) {
     return { ok: true, output: `Not a git repository: ${cwd}\nGit diff is unavailable; inspect files directly or use diff_text with known before/after content.` }
   }
-  const args = ['diff']
+  const args = ['diff', '--no-ext-diff', '--no-textconv']
   if (inp.staged === true) args.push('--staged')
   // `--` ends the options: a path can never be read as a git flag.
   if (inp.path) args.push('--', String(inp.path))
@@ -193,7 +303,7 @@ export async function execGitAdd(inp: Record<string, unknown>, cwd: string): Pro
     return { ok: false, output: `Not a git repository: ${cwd}\nCannot stage files without a git repository.` }
   }
   const paths = Array.isArray(inp.paths) ? inp.paths.map(String) : [String(inp.paths ?? '.')]
-  return gitRun(['add', '--', ...paths], cwd)
+  return gitRun(['add', '--', ...paths], cwd, { writesContent: true })
 }
 
 export async function execGitCommit(inp: Record<string, unknown>, cwd: string): Promise<TR> {
@@ -215,8 +325,8 @@ export async function execGitBranch(inp: Record<string, unknown>, cwd: string): 
     }
   }
   // A name git does not accept as a branch is refused by git itself (check-ref-format).
-  if (typeof inp.create === 'string') return gitRun(['checkout', '-b', inp.create], cwd)
-  if (typeof inp.checkout === 'string') return gitRun(['checkout', inp.checkout, '--'], cwd)
+  if (typeof inp.create === 'string') return gitRun(['checkout', '-b', inp.create], cwd, { writesContent: true })
+  if (typeof inp.checkout === 'string') return gitRun(['checkout', inp.checkout, '--'], cwd, { writesContent: true })
   return gitRun(['branch', '-a'], cwd)
 }
 
@@ -332,15 +442,25 @@ export async function execGenerateUuid(): Promise<TR> {
  * are never returned: not in the listing and not when asked for by name.
  */
 const SECRET_ENV_NAME = /(token|secret|passw(?:or)?d|passphrase|key|credential|auth|cookie|session|private|signature|dsn)/i
+/** Short secret words, matched as whole name parts only (PAT, not PATH). */
+const SECRET_ENV_PARTS = new Set(['pat', 'conn', 'dsn', 'cred', 'creds', 'pwd', 'pw'])
 
 export function isSecretEnvName(name: string): boolean {
-  return SECRET_ENV_NAME.test(name)
+  return SECRET_ENV_NAME.test(name) || name.toLowerCase().split(/[^a-z0-9]+/).some((part) => SECRET_ENV_PARTS.has(part))
+}
+
+/** A value carrying a login in a URL (scheme://user:password@host). */
+export function isCredentialedUrlValue(value: string): boolean {
+  return /[a-z][a-z0-9+.-]*:\/\/[^\s/@:]*:[^\s/@]*@/i.test(value)
 }
 
 const HIDDEN_ENV_VALUE = '(hidden: the name looks like a secret)'
 
 export async function execGetEnv(inp: Record<string, unknown>): Promise<TR> {
-  const read = (name: string): string | undefined => (isSecretEnvName(name) ? HIDDEN_ENV_VALUE : process.env[name])
+  const read = (name: string): string | undefined => {
+    const value = process.env[name]
+    return isSecretEnvName(name) || (value !== undefined && isCredentialedUrlValue(value)) ? HIDDEN_ENV_VALUE : value
+  }
   const keys = inp.keys
   if (Array.isArray(keys)) {
     const result: Record<string, string | undefined> = {}
@@ -354,7 +474,7 @@ export async function execGetEnv(inp: Record<string, unknown>): Promise<TR> {
   // Return all non-sensitive env vars
   const safe = Object.fromEntries(
     Object.entries(process.env)
-      .filter(([k]) => !isSecretEnvName(k))
+      .filter(([k, v]) => !isSecretEnvName(k) && !(v !== undefined && isCredentialedUrlValue(v)))
       .slice(0, 50)
   )
   return { ok: true, output: JSON.stringify(safe, null, 2) }
@@ -409,24 +529,35 @@ export async function execCalculate(inp: Record<string, unknown>): Promise<TR> {
 
 // ── Network ───────────────────────────────────────────────────────────────────
 
+// check_url and download_file use the shared guard (visual/safeDownload.ts):
+// every hop must resolve to a public address, the connection uses the
+// address that was checked, and each redirect is checked again.
+
+function networkRefusal(tool: string, url: string, e: unknown): TR {
+  const message = e instanceof Error ? e.message.replace(/asset (?:URL|host)/g, 'URL') : String(e)
+  return { ok: false, output: `${tool}: ${e instanceof AssetDownloadError ? message : `failed: ${message}`} (${url})` }
+}
+
 export async function execCheckUrl(inp: Record<string, unknown>): Promise<TR> {
   const url = String(inp.url ?? '')
   try {
-    const resp = await fetch(url, { method: 'HEAD', signal: AbortSignal.timeout(10_000) })
-    return { ok: resp.ok, output: `HTTP ${resp.status} ${resp.statusText}  (${url})` }
-  } catch (e) { return { ok: false, output: String(e) } }
+    const resp = await guardedRequest(url, { method: 'HEAD', timeoutMs: 10_000 })
+    const ok = resp.status >= 200 && resp.status < 300
+    return { ok, output: `HTTP ${resp.status}${resp.statusText ? ` ${resp.statusText}` : ''}  (${url})` }
+  } catch (e) { return networkRefusal('check_url', url, e) }
 }
 
 export async function execDownloadFile(inp: Record<string, unknown>, cwd: string, permissionMode?: 'ask' | 'full-access' | 'read' | 'write'): Promise<TR> {
   const url = String(inp.url ?? '')
-  const g = guardPath(cwd, String(inp.destination ?? basename(url.split('?')[0] ?? 'download')), permissionMode)
+  const g = guardWritePath(cwd, String(inp.destination ?? basename(url.split('?')[0] ?? 'download')), permissionMode)
   if (!g.ok) return g
+  let body: Buffer
   try {
-    const resp = await fetch(url, { signal: AbortSignal.timeout(30_000) })
-    if (!resp.ok) return { ok: false, output: `HTTP ${resp.status}: ${url}` }
-    const buf = await resp.arrayBuffer()
-    await writeFile(g.absolute, Buffer.from(buf))
-    return { ok: true, output: `Downloaded ${buf.byteLength} bytes to ${g.absolute}` }
+    body = (await downloadGuardedUrl(url, { timeoutMs: 30_000 })).body
+  } catch (e) { return networkRefusal('download_file', url, e) }
+  try {
+    await writeFile(g.absolute, body)
+    return { ok: true, output: `Downloaded ${body.byteLength} bytes to ${g.absolute}` }
   } catch (e) { return { ok: false, output: String(e) } }
 }
 
@@ -540,7 +671,7 @@ export async function execHashFile(inp: Record<string, unknown>, cwd: string, pe
 // ── Dispatcher ────────────────────────────────────────────────────────────────
 
 export const GET_ENV_DESCRIPTION =
-  'Read environment variables by name (key or keys), or list up to 50 when no name is given. Variables whose names look like secrets (token, key, password, secret, credential, auth, cookie, session …) are never returned, not even by name.'
+  'Read environment variables by name (key or keys), or list up to 50 when no name is given. Variables whose names look like secrets (token, key, password, secret, credential, auth, cookie, session, PAT …) or whose values are URLs with a login (scheme://user:pass@host) are never returned, not even by name.'
 
 export const EXTRA_TOOL_NAMES = new Set([
   'delete_file','move_file','copy_file','create_directory','delete_directory','file_info','list_directory',

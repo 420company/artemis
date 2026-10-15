@@ -1515,7 +1515,7 @@ const actionToolDefs: ToolDefinition[] = [
   // System
   {
     type: 'get_env',
-    description: 'Read environment variables by name (key or keys), or list up to 50 when no name is given. Variables whose names look like secrets (token, key, password, secret, credential, auth, cookie, session …) are never returned, not even by name.',
+    description: 'Read environment variables by name (key or keys), or list up to 50 when no name is given. Variables whose names look like secrets (token, key, password, secret, credential, auth, cookie, session, PAT …) or whose values are URLs with a login (scheme://user:pass@host) are never returned, not even by name.',
     kind: 'code',
     permissionCategory: 'read',
     executionMode: 'blocking',
