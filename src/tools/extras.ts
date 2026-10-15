@@ -143,6 +143,11 @@ export function gitSafetyOptions(filterDrivers: readonly string[] = []): string[
   const options = [
     '--no-pager',
     '-c', 'core.fsmonitor=false',
+    // Never descend into a submodule: its own config (filter drivers,
+    // fsmonitor, hooks) is not the repository the checks above looked at.
+    '-c', 'submodule.recurse=false',
+    '-c', 'diff.ignoreSubmodules=all',
+    '-c', 'status.submoduleSummary=false',
     '-c', `core.hooksPath=${noHooksDir()}`,
     '-c', 'diff.external=',
     '-c', `core.attributesFile=${devNull}`,
@@ -291,14 +296,14 @@ export async function execGitStatus(_inp: Record<string, unknown>, cwd: string):
   if (!(await isGitRepository(cwd))) {
     return { ok: true, output: `Not a git repository: ${cwd}\nGit status is unavailable for this workspace.` }
   }
-  return gitRun(['status', '--short', '--branch'], cwd)
+  return gitRun(['status', '--short', '--branch', '--ignore-submodules=all'], cwd)
 }
 
 export async function execGitDiff(inp: Record<string, unknown>, cwd: string): Promise<TR> {
   if (!(await isGitRepository(cwd))) {
     return { ok: true, output: `Not a git repository: ${cwd}\nGit diff is unavailable; inspect files directly or use diff_text with known before/after content.` }
   }
-  const args = ['diff', '--no-ext-diff', '--no-textconv']
+  const args = ['diff', '--no-ext-diff', '--no-textconv', '--ignore-submodules=all']
   if (inp.staged === true) args.push('--staged')
   // `--` ends the options: a path can never be read as a git flag.
   if (inp.path) args.push('--', String(inp.path))
@@ -319,7 +324,23 @@ export async function execGitAdd(inp: Record<string, unknown>, cwd: string): Pro
     return { ok: false, output: `Not a git repository: ${cwd}\nCannot stage files without a git repository.` }
   }
   const paths = Array.isArray(inp.paths) ? inp.paths.map(String) : [String(inp.paths ?? '.')]
-  return gitRun(['add', '--', ...paths], cwd, { writesContent: true })
+  // git add has no --ignore-submodules: submodules are left out by pathspec,
+  // so add never looks inside one (and never runs its own filter drivers).
+  const submodules = (await gitSubmodulePaths(cwd)).map((sub) => `:(exclude,top,literal)${sub}`)
+  return gitRun(['add', '--', ...paths, ...submodules], cwd, { writesContent: true })
+}
+
+/** Paths of the submodules (gitlinks) in the index; read from the index only. */
+async function gitSubmodulePaths(cwd: string): Promise<string[]> {
+  try {
+    const { stdout } = await runFile('git', [...gitSafetyOptions(), 'ls-files', '--stage', '-z'], cwd, 15_000)
+    return stdout.split('\0')
+      .filter((entry) => entry.startsWith('160000 '))
+      .map((entry) => entry.slice(entry.indexOf('\t') + 1))
+      .filter(Boolean)
+  } catch {
+    return []
+  }
 }
 
 export async function execGitCommit(inp: Record<string, unknown>, cwd: string): Promise<TR> {
