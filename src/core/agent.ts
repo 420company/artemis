@@ -92,6 +92,7 @@ import { fitImagesToRequest, imageByteSize, MAX_IMAGES_PER_REQUEST, MAX_REQUEST_
 import {
   ContextOverflowError,
   buildContextOverflowMessage,
+  continueConversationForSummary,
   detectConversationLanguage,
   isContextOverflowError,
   isSyntheticUserMessage,
@@ -99,11 +100,14 @@ import {
   carriedRequestNote,
   measureContext,
   normalizeContextState,
+  recallMainRequest,
   recordProviderUsage,
+  rememberMainRequest,
   resolveContextBudget,
   spillToolResultIfLarge,
   type ContextBudget,
   type ContextState,
+  type ContinuationSummarizeFn,
   type ManageReason,
   type SummarizeFn,
 } from './compaction/index.js';
@@ -4199,6 +4203,8 @@ export type RunAgentOptions = {
     thresholdRatio?: number;
     /** Optional cap below the model window, for cost control. */
     maxContextTokens?: number;
+    /** Tier-2 summaries continue the main conversation's cached prefix (core/compaction/continuation.ts). */
+    cacheAwareSummary?: boolean;
   };
   /** Called with a short user-facing line whenever the history is compacted. */
   onContextCompaction?: (notice: string) => void;
@@ -7144,6 +7150,26 @@ async function runAgentInner(
     ], { abortSignal: options.abortSignal });
     return response.text ?? '';
   };
+  // Cache-aware summaries (opt-in): the summary request continues the
+  // session's last main request, so its history is read from the provider's
+  // prompt cache. Without one, or on another model, the cold path runs.
+  const cacheAwareSummary = options.compaction?.cacheAwareSummary === true;
+  const continueSummary: ContinuationSummarizeFn | undefined = cacheAwareSummary
+    ? (request) => {
+      const summarizer = summarizerProvider();
+      return continueConversationForSummary({
+        record: recallMainRequest(session.id),
+        summarizer: { provider: summarizer, model: summarizer.model },
+        request,
+        abortSignal: options.abortSignal,
+        // A main-model answer may come as the reply envelope; actions are not a summary.
+        readReply: (text) => {
+          const envelope = tryParseEnvelope(text);
+          return (envelope.actions?.length ?? 0) > 0 ? undefined : envelope.reply;
+        },
+      });
+    }
+    : undefined;
   // Stable system content, rebuilt only when what it depends on changes.
   let systemCache: { key: string; content: string } | undefined;
   const getSystemContent = async (nativeTools: boolean, imageSection: string | undefined): Promise<string> => {
@@ -7235,6 +7261,7 @@ async function runAgentInner(
       state: contextState,
       storage: contextStorage,
       summarize,
+      ...(continueSummary ? { continueSummary } : {}),
       summarizerWindow: summarizerProvider().contextWindow,
       restore: {
         cwd: options.cwd,
@@ -7262,6 +7289,12 @@ async function runAgentInner(
     if (managed.notice) {
       options.onInfo?.(managed.notice);
       options.onContextCompaction?.(managed.notice);
+    }
+    if (managed.summaryPath) {
+      options.onInfo?.(
+        `[context] summary path=${managed.summaryPath} calls=${managed.summarizerCalls ?? 0} input~${managed.summarizerInputTokens ?? 0}` +
+        (managed.continuationSkipped ? ` continuation_skipped=${JSON.stringify(managed.continuationSkipped)}` : ''),
+      );
     }
     const measured = measureContext(contextState, session.messages, fixedTokens);
     options.onInfo?.(
@@ -7999,6 +8032,24 @@ async function runAgentInner(
         const detail = retryError instanceof Error ? retryError.message.split('\n')[0]!.slice(0, 200) : String(retryError);
         throw new ContextOverflowError(buildContextOverflowMessage(contextLanguage, detail), retryError);
       }
+    }
+    if (cacheAwareSummary) {
+      // What a continuation summary repeats: this request up to its cache mark.
+      rememberMainRequest(session.id, {
+        provider: activeProvider,
+        model: activeProvider.model,
+        system: providerMessages[0]!,
+        history: providerMessages.slice(1, 1 + prepared.sentCount),
+        requestOptions: {
+          nativeFunctionTools,
+          // Only cache-marked images are part of every request's prefix.
+          ...(activeProvider.promptCacheMarks === true ? {
+            ...(providerCallOptions.imageAttachments ? { imageAttachments: providerCallOptions.imageAttachments } : {}),
+            ...(cachedImages?.groups.length ? { imageGroups: cachedImages.groups } : {}),
+            ...(visionSkip ? { visionSkip } : {}),
+          } : {}),
+        },
+      });
     }
     // The first request of the turn carried exactly the stored history, so
     // its provider count anchors the next measurement.

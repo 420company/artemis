@@ -515,6 +515,10 @@ export async function createProviderRouter(
           // above sends a request with images to it.
           return buildCandidates().some((candidate) => candidate.provider.bridgesImages === true);
         },
+        // The model of the candidate this target tries first (prompt caches are per model).
+        get model() {
+          return rankForTarget(buildCandidates())[0]?.provider.model;
+        },
         // The window of the provider this target tries first.
         get contextLength() {
           return rankForTarget(buildCandidates())[0]?.provider.contextLength;

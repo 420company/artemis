@@ -3,13 +3,69 @@
  * before/after comparison of two result files (--compare).
  */
 
-import type { CategorySummary, RunResults, RunSummary, TaskResult, Usage } from './types.js'
+import { cacheHitRatio } from './pricing.js'
+import type { CategorySummary, CompactionCounts, RunResults, RunSummary, TaskResult, TurnTrace, Usage } from './types.js'
+
+const OPTIONAL_COUNTS = [
+  'uncachedInputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'cacheWrite5mTokens', 'cacheWrite1hTokens',
+  'summarizerRequests', 'summarizerInputTokens', 'costUsd',
+] as const
 
 export function addUsage(into: Usage, more: Usage): Usage {
   into.requests += more.requests
   into.inputTokens += more.inputTokens
   into.outputTokens += more.outputTokens
+  for (const key of OPTIONAL_COUNTS) {
+    if (more[key] !== undefined) into[key] = (into[key] ?? 0) + more[key]!
+  }
+  for (const [kind, count] of Object.entries(more.apiErrors ?? {})) {
+    into.apiErrors = { ...(into.apiErrors ?? {}), [kind]: (into.apiErrors?.[kind] ?? 0) + count }
+  }
   return into
+}
+
+const TIER1_NOTICE = /^\[(?:context|上下文)\] (?:cleared|已清理)/
+const TIER2_NOTICE = /^\[(?:context|上下文)\] (?:compacted|已压缩)/
+const MECHANICAL_NOTICE = /mechanical summary|机械摘要/
+
+/** Compactions of a task's turns, from the engine's notices and its `[context] summary path=` lines. */
+export function countCompactions(turns: readonly Pick<TurnTrace, 'contextNotices' | 'summaryPaths'>[]): CompactionCounts {
+  const counts: CompactionCounts = { tier1: 0, tier2: 0, mechanical: 0 }
+  for (const turn of turns) {
+    for (const notice of turn.contextNotices ?? []) {
+      if (TIER1_NOTICE.test(notice)) counts.tier1 += 1
+      if (TIER2_NOTICE.test(notice)) {
+        counts.tier2 += 1
+        if (MECHANICAL_NOTICE.test(notice)) counts.mechanical += 1
+      }
+    }
+    for (const kind of turn.summaryPaths ?? []) counts.paths = { ...(counts.paths ?? {}), [kind]: (counts.paths?.[kind] ?? 0) + 1 }
+  }
+  return counts
+}
+
+export function addCompactions(into: CompactionCounts, more: CompactionCounts | undefined): CompactionCounts {
+  if (!more) return into
+  into.tier1 += more.tier1
+  into.tier2 += more.tier2
+  into.mechanical += more.mechanical
+  for (const [kind, count] of Object.entries(more.paths ?? {})) into.paths = { ...(into.paths ?? {}), [kind]: (into.paths?.[kind] ?? 0) + count }
+  return into
+}
+
+/** Failed model requests with a 4xx status (the ship rule allows no new ones). */
+export function count4xx(usage: Usage): number {
+  return Object.entries(usage.apiErrors ?? {}).filter(([kind]) => /^4\d\d\b/.test(kind)).reduce((sum, [, count]) => sum + count, 0)
+}
+
+const fmtErrors = (usage: Usage) => {
+  const entries = Object.entries(usage.apiErrors ?? {}).sort(([a], [b]) => a.localeCompare(b))
+  return entries.length ? entries.map(([kind, count]) => `${kind} ×${count}`).join(', ') : 'none'
+}
+const fmtCompactions = (counts: CompactionCounts | undefined) => {
+  if (!counts) return '-'
+  const paths = Object.entries(counts.paths ?? {}).map(([kind, count]) => `${kind} ${count}`).join(', ')
+  return `${counts.tier1}/${counts.tier2}${paths ? ` (${paths})` : counts.mechanical ? ` (mechanical ${counts.mechanical})` : ''}`
 }
 
 const countsAsRun = (task: TaskResult) => task.status !== 'skipped'
@@ -29,6 +85,7 @@ export function summarize(tasks: TaskResult[], wallMs: number): RunSummary {
     entry.meanScore = entry.tasks ? entry.meanScore / entry.tasks : 0
   }
   const usage = tasks.reduce((acc, task) => addUsage(acc, task.usage), { requests: 0, inputTokens: 0, outputTokens: 0 })
+  const compactions = tasks.reduce((acc, task) => addCompactions(acc, task.compactions), { tier1: 0, tier2: 0, mechanical: 0 } as CompactionCounts)
   const costs = tasks.map((task) => task.costUsd).filter((cost): cost is number => typeof cost === 'number')
   const passed = ran.filter((task) => task.status === 'pass').length
   return {
@@ -39,6 +96,7 @@ export function summarize(tasks: TaskResult[], wallMs: number): RunSummary {
     byCategory,
     usage,
     ...(costs.length ? { costUsd: costs.reduce((a, b) => a + b, 0) } : {}),
+    compactions,
     wallMs,
   }
 }
@@ -47,6 +105,22 @@ const pct = (value: number) => `${Math.round(value * 100)}%`
 const secs = (ms: number) => `${(ms / 1000).toFixed(1)}s`
 const tokens = (usage: Usage) => usage.inputTokens + usage.outputTokens
 const money = (value: number | undefined) => (value === undefined ? '-' : `$${value.toFixed(4)}`)
+const num = (value: number | undefined) => (value ?? 0).toLocaleString('en-US')
+const hit = (usage: Usage) => (usage.cacheReadTokens === undefined ? '-' : pct(cacheHitRatio(usage)))
+
+/** Input split, cache use, compactions, summarizer input and API errors of a run. */
+export function renderTrafficLines(summary: RunSummary): string[] {
+  const usage = summary.usage
+  const writes = usage.cacheWrite5mTokens !== undefined || usage.cacheWrite1hTokens !== undefined
+    ? ` (5m ${num(usage.cacheWrite5mTokens)}, 1h ${num(usage.cacheWrite1hTokens)})`
+    : ''
+  const completed = summary.passed
+  return [
+    `- Input: uncached ${num(usage.uncachedInputTokens)} · cache read ${num(usage.cacheReadTokens)} · cache write ${num(usage.cacheWriteTokens)}${writes} · cache-hit ratio ${hit(usage)}`,
+    `- Compactions: tier 1 ${summary.compactions?.tier1 ?? 0}, tier 2 ${summary.compactions?.tier2 ?? 0}${summary.compactions?.paths ? ` (${Object.entries(summary.compactions.paths).map(([kind, count]) => `${kind} ${count}`).join(', ')})` : ''}${summary.compactions?.mechanical ? `, mechanical ${summary.compactions.mechanical}` : ''} · summarizer: ${num(usage.summarizerRequests)} request(s), ${num(usage.summarizerInputTokens)} input tokens`,
+    `- API errors: ${fmtErrors(usage)}${summary.costUsd !== undefined ? ` · $ per completed task ${completed ? money(summary.costUsd / completed) : '-'}` : ''}`,
+  ]
+}
 
 export function renderMarkdown(results: RunResults): string {
   const { summary } = results
@@ -57,20 +131,21 @@ export function renderMarkdown(results: RunResults): string {
     `- Commit: \`${results.git?.commit?.slice(0, 10) ?? '?'}\`${results.git?.branch ? ` (${results.git.branch}${results.git.dirty ? ', dirty' : ''})` : ''}`,
     `- Passed **${summary.passed}/${summary.tasks}** (${pct(summary.passRate)}), mean grader score ${pct(summary.meanScore)}`,
     `- Tokens ${tokens(summary.usage).toLocaleString('en-US')} (in ${summary.usage.inputTokens.toLocaleString('en-US')}, out ${summary.usage.outputTokens.toLocaleString('en-US')}, ${summary.usage.requests} model calls) · cost ${money(summary.costUsd)} · wall time ${secs(summary.wallMs)}`,
+    ...renderTrafficLines(summary),
     '',
     '| Category | Passed | Pass rate | Mean score |',
     '|---|---|---|---|',
     ...Object.entries(summary.byCategory).sort(([a], [b]) => a.localeCompare(b)).map(([category, entry]) =>
       `| ${category} | ${entry.passed}/${entry.tasks} | ${pct(entry.passRate)} | ${pct(entry.meanScore)} |`),
     '',
-    '| Task | Category | Status | Graders | Tokens | Cost | Time | Failed graders |',
-    '|---|---|---|---|---|---|---|---|',
+    '| Task | Category | Status | Graders | Tokens | Cache hit | Compactions (t1/t2) | Cost | Time | Failed graders |',
+    '|---|---|---|---|---|---|---|---|---|---|',
     ...results.tasks.map((task) => {
       const graded = task.graders.filter((grader) => grader.status !== 'skip')
       const passed = graded.filter((grader) => grader.status === 'pass').length
       const failed = task.graders.filter((grader) => grader.status === 'fail').map((grader) => `${grader.id}: ${grader.detail}`.replace(/\|/g, '\\|').slice(0, 140))
       const extra = task.error ? [`error: ${task.error}`.replace(/\|/g, '\\|').slice(0, 140)] : []
-      return `| ${task.id}${task.repeat ? ` (#${task.repeat})` : ''} | ${task.category} | ${task.status} | ${passed}/${graded.length} | ${tokens(task.usage).toLocaleString('en-US')} | ${money(task.costUsd)} | ${secs(task.durationMs)} | ${[...failed, ...extra].join('<br>') || '-'} |`
+      return `| ${task.id}${task.repeat ? ` (#${task.repeat})` : ''} | ${task.category} | ${task.status} | ${passed}/${graded.length} | ${tokens(task.usage).toLocaleString('en-US')} | ${hit(task.usage)} | ${fmtCompactions(task.compactions)} | ${money(task.costUsd)} | ${secs(task.durationMs)} | ${[...failed, ...extra].join('<br>') || '-'} |`
     }),
     '',
   ]
@@ -92,6 +167,7 @@ export function renderComparison(before: RunResults, after: RunResults): string 
     `Tokens: ${delta(tokens(before.summary.usage), tokens(after.summary.usage), (n) => Math.round(n).toLocaleString('en-US'))}`,
     `Cost: ${before.summary.costUsd !== undefined && after.summary.costUsd !== undefined ? delta(before.summary.costUsd, after.summary.costUsd, (n) => `$${n.toFixed(4)}`) : `${money(before.summary.costUsd)} → ${money(after.summary.costUsd)}`}`,
     `Wall time: ${delta(before.summary.wallMs, after.summary.wallMs, secs)}`,
+    `Cache-hit ratio: ${hit(before.summary.usage)} → ${hit(after.summary.usage)} · 4xx: ${count4xx(before.summary.usage)} → ${count4xx(after.summary.usage)}`,
     '',
     '| Category | Before | After | Δ pass rate |',
     '|---|---|---|---|',

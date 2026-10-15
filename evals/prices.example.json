@@ -1,0 +1,8 @@
+{
+  "note": "Format example only. These numbers are PLACEHOLDERS, not real prices. Copy to evals/prices.local.json (git-ignored) and fill in your provider's rates: USD per 1M tokens.",
+  "models": {
+    "example-model-id": { "input": 1.0, "cacheRead": 0.1, "cacheWrite": 1.25, "cacheWrite1h": 2.0, "output": 5.0 },
+    "example-family-*": { "input": 2.0, "output": 10.0 }
+  },
+  "default": { "input": 1.0, "cacheRead": 0.1, "cacheWrite": 1.25, "output": 5.0 }
+}

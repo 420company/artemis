@@ -287,6 +287,13 @@ export type AgentSetupConfig = {
      * 200K; 0 removes the cap.
      */
     maxContextTokens?: number;
+    /**
+     * Tier-2 summaries continue the main conversation (same model, system
+     * prompt, tools and history, then a summary instruction) so they read the
+     * provider's prompt cache instead of re-sending the history cold. Off by
+     * default; ARTEMIS_CACHE_AWARE_SUMMARY overrides it.
+     */
+    cacheAwareSummary?: boolean;
   };
   sessionReset: {
     mode: 'both' | 'idle' | 'daily' | 'never';

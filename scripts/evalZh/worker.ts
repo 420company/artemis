@@ -16,7 +16,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { buildLongChat } from './assets.js'
 import { buildJudgePrompt, JUDGE_SYSTEM, parseJudgeReply } from './judge.js'
-import { TrafficMeter } from './meter.js'
+import { TrafficMeter, type MeterOptions } from './meter.js'
 import { startMockServer, type MockServerHandle } from './mockServer.js'
 import { installMockBrowser, startMockWeb, withMockWeb, type MockWebHandle } from './mockWeb.js'
 import { fileURLToPath } from 'node:url'
@@ -142,11 +142,17 @@ function parseUsageLine(line: string, into: Usage): void {
   into.outputTokens += field('completion')
 }
 
+/** Usage and API errors as `@@EVAL` lines: the runner prices and budgets from them. */
+const reportTraffic: Pick<MeterOptions, 'onUsage' | 'onApiError'> = {
+  onUsage: (usage, request) => emit({ type: 'usage', ...usage, kind: request.kind, ...(request.model ? { model: request.model } : {}) }),
+  onApiError: (kind, request) => emit({ type: 'api_error', kind, ...(request.model ? { model: request.model } : {}) }),
+}
+
 async function runTurn(job: WorkerTurnJob): Promise<TurnTrace> {
   const meter = new TrafficMeter({
     offline: job.mode === 'mock',
     probes: job.probes,
-    onUsage: (usage) => emit({ type: 'usage', input: usage.input, output: usage.output }),
+    ...reportTraffic,
   })
   meter.install()
 
@@ -264,6 +270,7 @@ async function runTurn(job: WorkerTurnJob): Promise<TurnTrace> {
     mainRequests: meter.mainRequests,
     transcript,
     blockedHosts: [...meter.blockedHosts],
+    summaryPaths: infos.map((line) => line.match(/^\[context\] summary path=(\w+)/)?.[1]).filter((value): value is string => Boolean(value)),
     ...(error ? { error } : {}),
     infoTail: infos.filter((line) => !/^\[stream-/.test(line)).slice(-40),
     events: infos.filter((line) => /^\[agent-(?:update|status)\] /.test(line)),
@@ -274,7 +281,7 @@ async function runJudge(job: WorkerJudgeJob): Promise<JudgeOutcome> {
   const meter = new TrafficMeter({
     offline: job.mode === 'mock',
     probes: [],
-    onUsage: (usage) => emit({ type: 'usage', input: usage.input, output: usage.output }),
+    ...reportTraffic,
   })
   meter.install()
   let mock: MockServerHandle | undefined
