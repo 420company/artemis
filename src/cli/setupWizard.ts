@@ -97,6 +97,36 @@ function normalizeSection(value: string | undefined): SetupSection | undefined {
   return undefined
 }
 
+/**
+ * The wizard's platform STT entry merged over the global store's speech
+ * entry, or undefined when that entry is managed by the platform sign-in:
+ * the wizard never writes into it.
+ */
+export function mergeWizardSpeechEntry(
+  current: PlatformSpeechStoreEntry | undefined,
+  entry: PlatformSpeechStoreEntry,
+): PlatformSpeechStoreEntry | undefined {
+  if (current?.managedBy === 'platform') return undefined
+  return { ...current, ...entry }
+}
+
+/** setup.voice.stt after the wizard: backend, local Whisper fallback and the recognition language. */
+export function wizardSttSetup(
+  previous: VoiceSetupConfig['stt'],
+  answers: { enabled: boolean; provider: VoiceSetupConfig['stt']['provider']; engine?: VoiceSetupConfig['stt']['engine']; localModel?: VoiceSetupConfig['stt']['localModel']; language?: string },
+): VoiceSetupConfig['stt'] {
+  const language = answers.language?.trim()
+  return {
+    ...previous,
+    enabled: answers.enabled,
+    provider: answers.provider,
+    // Local Whisper settings are kept as fallback; platformSpeechFallsBack() uses them on platform errors.
+    engine: answers.engine,
+    localModel: answers.localModel,
+    ...(language ? { language } : {}),
+  }
+}
+
 /** Normalize a gateway base URL, or undefined when it is not http(s). */
 function normalizeGatewayUrl(raw: string): string | undefined {
   const trimmed = raw.trim().replace(/\/+$/, '')
@@ -272,6 +302,7 @@ async function configureTTSSettings(options: { cwd: string; locale: UiLocale }):
   // --- STT backend: local Whisper vs platform speech recognition ---
   let sttBackend: 'local' | 'platform' = 'local'
   let platformSttSummary: { baseUrl: string; sttModel: string; language?: string } | undefined
+  let sttLanguage = ''
 
   if (sttEnabled) {
     const backendChoice = await chooseInteractiveOption<'local' | 'platform'>({
@@ -280,13 +311,19 @@ async function configureTTSSettings(options: { cwd: string; locale: UiLocale }):
       choices: [
         { label: tr(locale, '本地 Whisper（免费，在本机运行）', 'Local Whisper (free, runs on this machine)'), value: 'local' },
         {
-          label: tr(locale, '平台语音识别（需要网关地址和 API 密钥，费用计入你的账户）', 'Platform speech recognition (needs gateway URL and API key, billed to your account)'),
+          label: tr(locale, '平台语音识别（需要网关地址和 API 密钥）', 'Platform speech recognition (needs gateway URL and API key)'),
           value: 'platform',
         },
       ],
     })
 
-    if (backendChoice === 'platform') {
+    const globalStore = createGlobalProviderStore()
+    const platformManaged = backendChoice === 'platform' && (await globalStore.load()).speech?.managedBy === 'platform'
+    if (platformManaged) {
+      // Set up by the platform sign-in: used as it is, never changed here.
+      sttBackend = 'platform'
+      console.log(tr(locale, '  平台语音识别已由平台登录配置，直接使用，不在这里修改。', '  Platform speech recognition is already set up by your platform sign-in; it is used as is and not changed here.'))
+    } else if (backendChoice === 'platform') {
       let baseUrl: string | undefined
       for (let attempt = 0; attempt < 3 && !baseUrl; attempt++) {
         const rawUrl = await askText(tr(locale, '网关地址（如 https://gw.example.com/v1，留空取消）', 'Gateway base URL (e.g. https://gw.example.com/v1, empty to cancel)'), '')
@@ -304,6 +341,7 @@ async function configureTTSSettings(options: { cwd: string; locale: UiLocale }):
       const language = platformModel
         ? (await askText(tr(locale, '识别语言（可选，如 zh、en；留空自动检测）', 'Recognition language (optional, e.g. zh, en; empty = auto-detect)'), '')).trim()
         : ''
+      sttLanguage = language
 
       if (baseUrl && apiKey && platformModel) {
         const entry: PlatformSpeechStoreEntry = {
@@ -316,12 +354,17 @@ async function configureTTSSettings(options: { cwd: string; locale: UiLocale }):
           managedBy: 'user',
         }
         // Global store only: resolvePlatformSpeech() never reads workspace stores.
-        // Merge with any existing entry so platform-written TTS settings survive.
-        const globalStore = createGlobalProviderStore()
+        // Merged with an earlier wizard entry; a platform-managed entry is never touched.
         const current = await globalStore.load()
-        await globalStore.save({ ...current, speech: { ...current.speech, ...entry } })
-        sttBackend = 'platform'
-        platformSttSummary = { baseUrl, sttModel: platformModel, ...(language ? { language } : {}) }
+        const speech = mergeWizardSpeechEntry(current.speech, entry)
+        if (speech) {
+          await globalStore.save({ ...current, speech })
+          sttBackend = 'platform'
+          platformSttSummary = { baseUrl, sttModel: platformModel, ...(language ? { language } : {}) }
+        } else {
+          sttBackend = 'platform'
+          console.log(tr(locale, '  平台语音识别已由平台登录配置，未做修改。', '  Platform speech recognition is set up by your platform sign-in; it was not changed.'))
+        }
       } else {
         console.log(tr(locale, '  未完成平台配置，继续使用本地 Whisper。', '  Platform setup incomplete; keeping local Whisper.'))
       }
@@ -339,14 +382,13 @@ async function configureTTSSettings(options: { cwd: string; locale: UiLocale }):
         // Answering yes here is the operator's explicit opt-in (core/edgeTts.ts).
         edgeOptIn: ttsEnabled,
       },
-      stt: {
-        ...setup.voice.stt,
+      stt: wizardSttSetup(setup.voice.stt, {
         enabled: sttEnabled,
         provider: sttBackend,
-        // Local Whisper settings are kept as fallback; platformSpeechFallsBack() uses them on platform errors.
         engine: sttEngine,
         localModel: sttModel,
-      },
+        language: sttLanguage,
+      }),
       voice: {
         ...setup.voice.voice,
         autoTts: false,

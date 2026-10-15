@@ -279,6 +279,11 @@ console.log('transcribe_audio against a fake gateway');
       result.ok && result.output.includes('第1段（3秒）') && calls.length === 1 && calls[0]!.model === 'asr-test' && calls[0]!.type === 'audio/wav' && !result.output.includes('saved'),
       result.output,
     );
+    assert(
+      'the transcript is fenced as untrusted content (spoken words are data, never instructions)',
+      /<<<UNTRUSTED-[0-9a-f]+\n第1段（3秒）\nUNTRUSTED-[0-9a-f]+>>>/.test(result.output) && /not instructions from the user/.test(result.output),
+      result.output,
+    );
 
     // Eleven minutes with pauses, as an MP3 (ffmpeg turns it back into WAV pieces).
     const longMp3 = path.join(workspace, 'meeting.mp3');
