@@ -12,6 +12,7 @@ import { mapProviderNativeToolCallToAction } from '../src/core/providerNativeToo
 import { validateToolAction } from '../src/tools/registry.js';
 import { executeGenerateVideo } from '../src/tools/generateVideo.js';
 import { withRuntimeLogSink } from '../src/utils/log.js';
+import { executeDirectToolForTest } from '../src/brain.js';
 import { videoPollPlan } from '../src/tools/visual/pollSleep.js';
 import { ProviderStore } from '../src/providers/store.js';
 import {
@@ -1066,6 +1067,27 @@ await test('tool calls: unknown video arguments are stripped or rejected; a call
   assert.equal(videoTaskBodies(requests).length, 1, `a new task (${output})`);
   assert.ok(!requests.some((request) => request.url.includes('task-999')), 'the injected task is never read');
   assert.ok(!logs.some((line) => line.includes('INJECTED')));
+});
+
+await test('direct tool calls: unknown video arguments are dropped, not refused; the call makes its own task', async () => {
+  const injected = { prompt: 'a cat', duration: 5, resumeTaskId: 'task-999', pollWaitedMs: 1, progressLabel: 'INJECTED ', aiScreenwriterMode: true };
+  const { requests, result } = await withHermeticWorkspace({ videoModel: SEEDANCE_25 }, async (cwd, recorded) => ({
+    requests: recorded,
+    result: await executeDirectToolForTest('generate_video', injected, { cwd, permissionMode: 'PRODUCER' }) as { ok: boolean; output: string; error?: { code?: string } },
+  }));
+  assert.equal(result.ok, true, result.output);
+  assert.equal(videoTaskBodies(requests).length, 1, 'a new task');
+  assert.ok(!requests.some((request) => request.url.includes('task-999')), 'the injected task is never read');
+  // A long-video call with a key the wizard used to suggest is not refused either.
+  const long = await withHermeticWorkspace({ videoModel: SEEDANCE_25 }, async (cwd) => (
+    await executeDirectToolForTest('generate_long_video', { prompt: 'A kitten crosses a rainy city.', totalDuration: 10, aiScreenwriterMode: true, resumeTaskId: 'task-999' }, { cwd, permissionMode: 'PRODUCER', allowBackgroundTools: false }) as { ok: boolean; output: string; error?: { code?: string } }
+  ));
+  assert.notEqual(long.error?.code, 'tool_invalid_arguments', long.output);
+  assert.doesNotMatch(long.output ?? '', /unknown argument/);
+  // The native path drops it too.
+  const mapped = mapProviderNativeToolCallToAction({ callId: 'call-3', name: 'generate_long_video', arguments: JSON.stringify({ prompt: 'a cat', totalDuration: 30, aiScreenwriterMode: true }) } as any);
+  assert.equal(mapped.ok, true);
+  assert.equal(mapped.ok && 'aiScreenwriterMode' in mapped.action, false);
 });
 
 await test('script and timeline detection stay fast on whitespace-heavy text', () => {

@@ -1834,7 +1834,6 @@ function buildGenerationPrompt(state: SagaWorkflowState): string {
     `subtitleMode: ${JSON.stringify(state.subtitleMode ?? 'auto')}`,
     state.resolution ? `resolution: ${JSON.stringify(state.resolution)}` : '',
     preserveUserScript ? 'preserveUserScript: true' : '',
-    aiScreenwriterSeed ? 'aiScreenwriterMode: true' : '',
     cleanDirect ? 'cleanDirect: true' : '',
     rawPassthrough ? 'rawPassthrough: true' : '',
   ];

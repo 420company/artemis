@@ -575,6 +575,18 @@ export function allowedActionArgumentKeys(type: string | undefined): ReadonlySet
   return type ? ACTION_ARGUMENT_KEYS[type] : undefined;
 }
 
+/**
+ * A tool call's arguments without the keys its tool does not take (for tools
+ * that limit them), for the paths that build an action from a model's tool
+ * call: native tool calls and the direct-tool runner. Other ingestion keeps
+ * validateToolAction's strict check.
+ */
+export function stripUnknownActionArguments(type: string | undefined, args: Record<string, unknown>): Record<string, unknown> {
+  const allowed = allowedActionArgumentKeys(type);
+  if (!allowed) return args;
+  return Object.fromEntries(Object.entries(args).filter(([key]) => allowed.has(key) && key !== 'type'));
+}
+
 function validateKnownArgumentKeys(action: any, errors: string[]): void {
   const allowed = allowedActionArgumentKeys(action?.type);
   if (!allowed || !action || typeof action !== 'object') return;
@@ -1227,7 +1239,8 @@ const actionToolDefs: ToolDefinition[] = [
     executionMode: 'blocking',
     parallelSafe: false,
     validate: validateGenerateVideoAction,
-    execute: executeGenerateVideo as any,
+    // Only the action and context: the task options are Saga's alone.
+    execute: (action: any, context: any) => executeGenerateVideo(action, context),
   },
   {
     type: 'generate_long_video',

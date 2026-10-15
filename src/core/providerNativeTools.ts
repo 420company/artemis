@@ -3,9 +3,9 @@ import {
   type AgentActionType,
 } from './types.js';
 import {
-  allowedActionArgumentKeys,
   getProviderCallableActionTypes,
   getToolDefinition,
+  stripUnknownActionArguments,
   validateToolAction,
 } from '../tools/registry.js';
 import type { ToolError } from '../tools/types.js';
@@ -2200,10 +2200,7 @@ export function mapProviderNativeToolCallToAction(
 
   // A tool that limits its arguments gets only those: anything else in the
   // call (an internal option, a key a prompt injection added) is dropped.
-  const allowedKeys = allowedActionArgumentKeys(call.name);
-  const args = allowedKeys
-    ? Object.fromEntries(Object.entries(parsedArguments as Record<string, unknown>).filter(([key]) => allowedKeys.has(key) && key !== 'type'))
-    : parsedArguments;
+  const args = stripUnknownActionArguments(call.name, parsedArguments as Record<string, unknown>);
   const action = {
     type: call.name,
     ...args,
