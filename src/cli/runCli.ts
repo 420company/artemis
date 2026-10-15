@@ -133,7 +133,7 @@ export async function runCli(argv: string[]): Promise<void> {
   // The owner's news interest topics (a host's morning job): headless, once, then exit.
   if (options.command === 'interests') {
     const { runInterestsCommand } = await import('./interestsCommand.js')
-    const { exitCode } = await runInterestsCommand({ cwd: options.cwd, locale, args: options.promptArgs ?? [] })
+    const { exitCode } = await runInterestsCommand({ cwd: options.cwd, locale, args: options.promptArgs ?? [], ...(options.model ? { model: options.model } : {}) })
     await new Promise<void>((resolve) => process.stdout.write('', () => resolve()))
     process.exit(exitCode)
   }
