@@ -542,8 +542,49 @@ function validateGenerateImageAction(action: any): string[] {
   return errors;
 }
 
+const VIDEO_REFERENCE_KEYS = [
+  'referenceImageUrls', 'referenceVideoUrls', 'referenceAudioUrls',
+  'referenceImagePaths', 'referenceVideoPaths', 'referenceAudioPaths',
+  'firstFrameImageUrls', 'firstFrameImagePaths', 'lastFrameImageUrls', 'lastFrameImagePaths',
+] as const;
+
+/**
+ * The arguments a video call may carry: its tool schema's, plus the fields
+ * Artemis's own wizards set. Anything else is stripped from a native tool
+ * call and rejected otherwise, so no call (or text that steers one) reaches
+ * the generator's internals.
+ */
+const ACTION_ARGUMENT_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
+  generate_video: new Set([
+    'type', 'toolType', 'prompt', 'model', 'ratio', 'duration', 'resolution', 'outputPath', ...VIDEO_REFERENCE_KEYS,
+    'referenceNotes', 'generateAudio', 'subtitleMode', 'watermark', 'maxPolls', 'pollIntervalMs', 'runInBackground',
+  ]),
+  generate_long_video: new Set([
+    'type', 'toolType', 'prompt', 'title', 'story', 'referenceNotes', 'shots', 'continuity', 'model', 'ratio', 'duration',
+    'totalDuration', 'projectId', 'outputPath', 'assemblyMode', 'resume', 'preserveUserScript', 'resolution', 'cleanDirect',
+    'rawPassthrough', 'chainReferenceFrames', 'crossfadeMs', 'defaultTransition', 'continuityMode', 'colorMatch', 'quality',
+    'fps', 'gpu', 'videoBitrate', 'crf', ...VIDEO_REFERENCE_KEYS, 'storyboardImageUrls', 'storyboardImagePaths',
+    'soundtrackPath', 'soundtrackUrl', 'soundtrackStartSec', 'soundtrackVolumeDb', 'environmentVolumeDb',
+    'soundtrackFadeInSec', 'soundtrackFadeOutSec', 'generateAudio', 'subtitleMode', 'watermark', 'maxPolls',
+    'pollIntervalMs', 'runInBackground', 'identitySource', 'narrativeEntities',
+  ]),
+};
+
+/** The argument names a tool call of this type may carry, when the tool limits them. */
+export function allowedActionArgumentKeys(type: string | undefined): ReadonlySet<string> | undefined {
+  return type ? ACTION_ARGUMENT_KEYS[type] : undefined;
+}
+
+function validateKnownArgumentKeys(action: any, errors: string[]): void {
+  const allowed = allowedActionArgumentKeys(action?.type);
+  if (!allowed || !action || typeof action !== 'object') return;
+  const unknown = Object.keys(action).filter((key) => !allowed.has(key));
+  if (unknown.length > 0) errors.push(`unknown argument${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`);
+}
+
 function validateGenerateVideoAction(action: any): string[] {
   const errors: string[] = [];
+  validateKnownArgumentKeys(action, errors);
   validateRequiredNonEmptyString(action?.prompt, 'prompt', errors);
   validateOptionalNonEmptyString(action?.model, 'model', errors);
   validateStringArray(action?.referenceNotes, 'referenceNotes', errors);
@@ -640,6 +681,7 @@ const SAGA_TRANSITION_KINDS = [
 
 function validateGenerateLongVideoAction(action: any): string[] {
   const errors: string[] = [];
+  validateKnownArgumentKeys(action, errors);
   validateRequiredNonEmptyString(action?.prompt, 'prompt', errors);
   validateOptionalNonEmptyString(action?.title, 'title', errors);
   validateOptionalNonEmptyString(action?.story, 'story', errors);

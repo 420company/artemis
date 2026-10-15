@@ -675,7 +675,7 @@ function parseTimestampedShotsFromStory(
   //   [00:00:00-00:00:08]
   // Token = digits with optional ":mm" or ":mm:ss"
   const markerRe = new RegExp(
-    `\\[\\s*(${TIME_TOKEN})\\s*${TIME_SEPARATOR}\\s*(${TIME_TOKEN})\\s*${TIME_UNIT}?\\s*\\]`,
+    `\\[[ \\t]*(${TIME_TOKEN})[ \\t]*${TIME_SEPARATOR}[ \\t]*(${TIME_TOKEN})[ \\t]*(?:${TIME_UNIT}[ \\t]*)?\\]`,
     'gi',
   );
   let markers = Array.from(story.matchAll(markerRe));
@@ -683,7 +683,7 @@ function parseTimestampedShotsFromStory(
   // Fallback A: timecode without brackets at line-head, e.g. "0:00-0:08:" or "0-8s:"
   if (markers.length < 2) {
     const looseRe = new RegExp(
-      `(?:^|\\n)\\s*(${TIME_TOKEN})\\s*${TIME_SEPARATOR}\\s*(${TIME_TOKEN})\\s*${TIME_UNIT}?\\s*[:：]`,
+      `(?:^|\\n)[ \\t]*(${TIME_TOKEN})[ \\t]*${TIME_SEPARATOR}[ \\t]*(${TIME_TOKEN})[ \\t]*(?:${TIME_UNIT}[ \\t]*)?[:：]`,
       'gi',
     );
     markers = Array.from(story.matchAll(looseRe));
@@ -730,7 +730,7 @@ function parseTimestampedShotsFromStory(
   //   "Scene 1", "Shot 3", "镜头 4", "第 5 段", "段 1 ·", "Segment 2"
   // We distribute totalSeconds evenly across the detected scenes.
   if (totalSeconds && totalSeconds >= 8) {
-    const sceneRe = /(?:^|\n)\s*(?:(?:scene|shot|segment|镜头|段)\s*[#]?(\d+)|第\s*(\d+)\s*段)[\s.·:：、,。\-—–]/gi;
+    const sceneRe = /(?:^|\n)[ \t]*(?:(?:scene|shot|segment|镜头|段)[ \t]*[#]?(\d+)|第[ \t]*(\d+)[ \t]*段)[\s.·:：、,。\-—–]/gi;
     const sceneMarkers = Array.from(story.matchAll(sceneRe));
     if (sceneMarkers.length >= 2) {
       const distributed: SagaShotInput[] = [];
@@ -765,11 +765,11 @@ function parseTimestampedShotsFromStory(
 // and per-segment specificity) when the user has already structured their brief.
 export function hasStructuredBriefMarkers(text: string): boolean {
   if (!text) return false;
-  const bracketTimeRe = new RegExp(`\\[\\s*${TIME_TOKEN}\\s*${TIME_SEPARATOR}\\s*${TIME_TOKEN}\\s*${TIME_UNIT}?\\s*\\]`, 'i');
+  const bracketTimeRe = new RegExp(`\\[[ \\t]*${TIME_TOKEN}[ \\t]*${TIME_SEPARATOR}[ \\t]*${TIME_TOKEN}[ \\t]*(?:${TIME_UNIT}[ \\t]*)?\\]`, 'i');
   if (bracketTimeRe.test(text)) return true;
-  const looseTimeRe = new RegExp(`(?:^|\\n)\\s*${TIME_TOKEN}\\s*${TIME_SEPARATOR}\\s*${TIME_TOKEN}\\s*${TIME_UNIT}?\\s*[:：]`, 'i');
+  const looseTimeRe = new RegExp(`(?:^|\\n)[ \\t]*${TIME_TOKEN}[ \\t]*${TIME_SEPARATOR}[ \\t]*${TIME_TOKEN}[ \\t]*(?:${TIME_UNIT}[ \\t]*)?[:：]`, 'i');
   if (looseTimeRe.test(text)) return true;
-  const sceneRe = /(?:^|\n)\s*(?:(?:scene|shot|segment|镜头|段)\s*[#]?\d+|第\s*\d+\s*段)[\s.·:：、,。\-—–]/i;
+  const sceneRe = /(?:^|\n)[ \t]*(?:(?:scene|shot|segment|镜头|段)[ \t]*[#]?\d+|第[ \t]*\d+[ \t]*段)[\s.·:：、,。\-—–]/i;
   if (sceneRe.test(text)) return true;
   return false;
 }
@@ -1161,10 +1161,10 @@ export function isPollTimeoutErrorForTest(message: string | undefined): boolean 
 const SHORT_TIME_TOKEN = '(?:\\d{1,3}(?:\\.\\d+)?|\\d+:\\d{2}(?::\\d{2})?(?:\\.\\d+)?)';
 const CLOCK_TIME_TOKEN = '\\d+:\\d{2}(?::\\d{2})?(?:\\.\\d+)?';
 const USER_SCRIPT_MARKER_RE = new RegExp([
-  `(?<![\\d.:])${SHORT_TIME_TOKEN}\\s*${TIME_UNIT}?\\s*${TIME_SEPARATOR}\\s*${SHORT_TIME_TOKEN}\\s*${TIME_UNIT}(?![a-z])`,
-  `(?<![\\d.:])${CLOCK_TIME_TOKEN}\\s*${TIME_SEPARATOR}\\s*${CLOCK_TIME_TOKEN}`,
-  `(?:^|\\n)\\s*[[(（【]?\\s*${SHORT_TIME_TOKEN}\\s*${TIME_SEPARATOR}\\s*${SHORT_TIME_TOKEN}\\s*${TIME_UNIT}?\\s*[\\])）】:：]`,
-  '(?:^|\\n|\\s)(?:shot\\s*\\d+|镜头\\s*\\d+|第\\s*\\d+\\s*(?:幕|段|镜头))',
+  `(?<![\\d.:])${SHORT_TIME_TOKEN}[ \\t]*(?:${TIME_UNIT}[ \\t]*)?${TIME_SEPARATOR}[ \\t]*${SHORT_TIME_TOKEN}[ \\t]*${TIME_UNIT}(?![a-z])`,
+  `(?<![\\d.:])${CLOCK_TIME_TOKEN}[ \\t]*${TIME_SEPARATOR}[ \\t]*${CLOCK_TIME_TOKEN}`,
+  `(?:^|\\n)[ \\t]*(?:[[(（【][ \\t]*)?${SHORT_TIME_TOKEN}[ \\t]*${TIME_SEPARATOR}[ \\t]*${SHORT_TIME_TOKEN}[ \\t]*(?:${TIME_UNIT}[ \\t]*)?[\\])）】:：]`,
+  '(?:^|\\s)(?:shot[ \\t]*\\d+|镜头[ \\t]*\\d+|第[ \\t]*\\d+[ \\t]*(?:幕|段|镜头))',
 ].join('|'), 'i');
 
 /**
@@ -2314,7 +2314,6 @@ export async function executeGenerateLongVideo(
           watermark: action.watermark ?? false,
           maxPolls: Math.max(MIN_SAGA_SEGMENT_MAX_POLLS, action.maxPolls ?? 0),
           pollIntervalMs: action.pollIntervalMs,
-          progressLabel: `第 ${segment.index}/${segments.length} 段`,
         };
         // How long one attempt waits on its task, and the task a timed-out
         // attempt left still queued or running (polled again, not resubmitted).
@@ -2424,9 +2423,14 @@ export async function executeGenerateLongVideo(
               referenceImageUrls: referenceImageUrlsForCall.length > 0 ? referenceImageUrlsForCall : undefined,
               referenceImagePaths,
               generateAudio: usingAudio,
-              ...(pendingTask ? { resumeTaskId: pendingTask.taskId, pollWaitedMs: pendingTask.waitedMs } : {}),
             },
             context,
+            // Saga's own channel (never action fields): the segment named in
+            // the progress lines, and the task to poll again.
+            {
+              progressLabel: `第 ${segment.index}/${segments.length} 段`,
+              ...(pendingTask ? { resumeTaskId: pendingTask.taskId, pollWaitedMs: pendingTask.waitedMs } : {}),
+            },
           );
           if (result.ok) {
             succeeded = true;

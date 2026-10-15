@@ -181,11 +181,11 @@ function videoTaskStatusLabel(status: string): string {
  * About once a minute while a task is polled, a progress line: the Saga
  * segment when there is one, the task's status and the minutes waited.
  */
-function pollProgressLogger(action: GenerateVideoAction): (status: string, waitedMs: number) => void {
+function pollProgressLogger(task: VideoTaskOptions): (status: string, waitedMs: number) => void {
   let status = '';
   const report = minuteReporter((minutes) => {
-    toolLog(`⏳ ${action.progressLabel ?? ''}视频${videoTaskStatusLabel(status)}，已等待 ${minutes} 分钟…`);
-  }, action.pollWaitedMs ?? 0);
+    toolLog(`⏳ ${task.progressLabel ?? ''}视频${videoTaskStatusLabel(status)}，已等待 ${minutes} 分钟…`);
+  }, task.pollWaitedMs ?? 0);
   return (next, waitedMs) => {
     status = next;
     report(waitedMs);
@@ -199,12 +199,26 @@ function resolveConfiguredVideoModel(action: GenerateVideoAction, configuredMode
   return requestedModel;
 }
 
+/**
+ * What only Saga passes, never a tool call: poll a task already submitted
+ * (still queued or running when its last wait ran out) instead of submitting
+ * a new one, with the time already waited on it, and the segment named in
+ * the progress lines logged while it is polled. Not an action field, so no
+ * agent or tool argument can point the generator at another task.
+ */
+export type VideoTaskOptions = {
+  resumeTaskId?: string;
+  pollWaitedMs?: number;
+  progressLabel?: string;
+};
+
 export async function executeGenerateVideo(
   action: GenerateVideoAction,
   context: ToolExecutionContext,
+  task: VideoTaskOptions = {},
 ): Promise<ToolExecutionResult> {
   try {
-    const configuredResult = await tryGenerateWithConfiguredVisualProvider(action, context);
+    const configuredResult = await tryGenerateWithConfiguredVisualProvider(action, context, task);
     if (configuredResult) {
       return configuredResult;
     }
@@ -301,7 +315,7 @@ export async function executeGenerateVideo(
 
     // A task already submitted (still queued or running when its last wait
     // ran out) is polled again instead of being submitted twice.
-    let taskId = action.resumeTaskId?.trim() || undefined;
+    let taskId = task.resumeTaskId?.trim() || undefined;
     if (!taskId) {
       const createRes = await fetch(createEndpoint, {
         method: 'POST',
@@ -347,8 +361,8 @@ export async function executeGenerateVideo(
     let videoUrl: string | undefined;
     let lastStatus = 'pending';
 
-    const onPoll = pollProgressLogger(action);
-    let waitedMs = action.pollWaitedMs ?? 0;
+    const onPoll = pollProgressLogger(task);
+    let waitedMs = task.pollWaitedMs ?? 0;
     for (let attempt = 0; attempt < maxPolls; attempt++) {
       await pollSleep(pollIntervalMs, context.abortSignal);
       waitedMs += pollIntervalMs;
@@ -484,6 +498,7 @@ function legacyVideoFailure(
 async function tryGenerateWithConfiguredVisualProvider(
   action: GenerateVideoAction,
   context: ToolExecutionContext,
+  task: VideoTaskOptions,
 ): Promise<ToolExecutionResult | null> {
   const configured = await resolveConfiguredVisualProvider(context.cwd, 'video');
   if (!configured) {
@@ -517,7 +532,7 @@ async function tryGenerateWithConfiguredVisualProvider(
   const model = shouldPromoteBytePlusVideoModel(action, configured.config)
     ? BYTEPLUS_SEEDANCE_2_PRO_MODEL
     : resolveConfiguredVideoModel(action, configured.config.video.model || configured.model);
-  return generateVideoWithVisualProvider(action, context, configured.config, provider, model, 'configured visual API');
+  return generateVideoWithVisualProvider(action, context, configured.config, provider, model, 'configured visual API', task);
 }
 
 async function tryGenerateWithMainSecondaryFallbackProviders(
@@ -561,6 +576,7 @@ async function generateVideoWithVisualProvider(
   provider: any,
   model: string,
   _sourceLabel: string,
+  task: VideoTaskOptions = {},
 ): Promise<ToolExecutionResult> {
   const videoConfig = config.video;
   // No provider or model name in user-facing status; the project plan and
@@ -677,8 +693,8 @@ async function generateVideoWithVisualProvider(
     watermark: action.watermark ?? videoConfig.defaultParams.watermark,
     maxPolls: action.maxPolls,
     pollIntervalMs: action.pollIntervalMs,
-    ...(action.resumeTaskId ? { resumeTaskId: action.resumeTaskId, pollWaitedMs: action.pollWaitedMs } : {}),
-    onPoll: pollProgressLogger(action),
+    ...(task.resumeTaskId ? { resumeTaskId: task.resumeTaskId, pollWaitedMs: task.pollWaitedMs } : {}),
+    onPoll: pollProgressLogger(task),
     abortSignal: context.abortSignal,
   } as any);
 

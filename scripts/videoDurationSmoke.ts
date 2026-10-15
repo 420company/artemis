@@ -7,7 +7,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { fixturePng, imageBodies, runHermeticSaga, videoTaskBodies, withHermeticWorkspace } from './sagaHermeticHarness.js';
 import { extractOpeningFramingRegex } from '../src/tools/visual/sagaFraming.js';
-import { shouldPreserveUserScriptWithoutCriticRewrite } from '../src/tools/generateLongVideo.js';
+import { hasStructuredBriefMarkers, shouldPreserveUserScriptWithoutCriticRewrite } from '../src/tools/generateLongVideo.js';
+import { mapProviderNativeToolCallToAction } from '../src/core/providerNativeTools.js';
+import { validateToolAction } from '../src/tools/registry.js';
+import { executeGenerateVideo } from '../src/tools/generateVideo.js';
+import { withRuntimeLogSink } from '../src/utils/log.js';
 import { videoPollPlan } from '../src/tools/visual/pollSleep.js';
 import { ProviderStore } from '../src/providers/store.js';
 import {
@@ -1038,6 +1042,47 @@ await test('rewrites and fractions: a clip beat keeps its shots; split parts kee
   assert.equal(restoreClipBeat(before, 'Mira crosses the market in one take.'), before);
   // A beat of one shot is the rewrite's to change.
   assert.equal(restoreClipBeat('0–2s: a. 2s–end: b.', 'new beat'), 'new beat');
+});
+
+await test('tool calls: unknown video arguments are stripped or rejected; a call cannot resume another task', async () => {
+  const injected = { prompt: 'a cat', duration: 5, resumeTaskId: 'task-999', pollWaitedMs: 1, progressLabel: 'INJECTED ', cleanDirect: true };
+  const mapped = mapProviderNativeToolCallToAction({ callId: 'call-1', name: 'generate_video', arguments: JSON.stringify(injected) } as any);
+  assert.equal(mapped.ok, true);
+  const action = mapped.ok ? mapped.action as Record<string, unknown> : {};
+  for (const key of ['resumeTaskId', 'pollWaitedMs', 'progressLabel', 'cleanDirect']) assert.equal(key in action, false, `${key} stripped`);
+  assert.equal(action.prompt, 'a cat');
+  // Outside native tool calls the same keys are refused.
+  assert.match(validateToolAction({ type: 'generate_video', ...injected }).join('\n'), /unknown arguments: resumeTaskId, pollWaitedMs, progressLabel, cleanDirect/);
+  assert.match(validateToolAction({ type: 'generate_long_video', prompt: 'a cat', totalDuration: 30, resumeTaskId: 'task-999' }).join('\n'), /unknown argument: resumeTaskId/);
+  assert.deepEqual(validateToolAction({ type: 'generate_long_video', prompt: 'a cat', totalDuration: 30, subtitleMode: 'auto', identitySource: 'text_only', cleanDirect: true }), []);
+  const longMapped = mapProviderNativeToolCallToAction({ callId: 'call-2', name: 'generate_long_video', arguments: JSON.stringify({ prompt: 'a cat', totalDuration: 30, resumeTaskId: 'task-999' }) } as any);
+  assert.equal(longMapped.ok && 'resumeTaskId' in longMapped.action, false);
+  // The mapped call makes its own task and never polls the injected one.
+  const { requests, output, logs } = await withHermeticWorkspace({ videoModel: SEEDANCE_25 }, async (cwd, recorded) => {
+    const lines: string[] = [];
+    const result = await withRuntimeLogSink((entry) => { lines.push(entry.message); }, () => executeGenerateVideo(action as any, { cwd, permissionMode: 'full-access' } as any));
+    return { requests: recorded, output: result.output ?? '', logs: lines };
+  });
+  assert.equal(videoTaskBodies(requests).length, 1, `a new task (${output})`);
+  assert.ok(!requests.some((request) => request.url.includes('task-999')), 'the injected task is never read');
+  assert.ok(!logs.some((line) => line.includes('INJECTED')));
+});
+
+await test('script and timeline detection stay fast on whitespace-heavy text', () => {
+  const inputs = [
+    (' '.repeat(80) + '\n').repeat(625),
+    ' '.repeat(50_000),
+    '\n'.repeat(50_000),
+    ('[ ' + ' \n'.repeat(30) + '1 ' + ' '.repeat(30)).repeat(400).slice(0, 50_000),
+    ('1' + ' '.repeat(60) + '\n').repeat(800).slice(0, 50_000),
+  ];
+  for (const [index, story] of inputs.entries()) {
+    const started = Date.now();
+    assert.equal(shouldPreserveUserScriptWithoutCriticRewrite({ action: { story }, timestampedStoryShots: [] }), false);
+    assert.equal(hasStructuredBriefMarkers(story), false);
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < 250, `input ${index + 1}: ${elapsed} ms for 50 KB`);
+  }
 });
 
 console.log(`\n  ✔ ${passed} video duration checks passed`);
