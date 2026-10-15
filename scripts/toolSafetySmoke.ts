@@ -244,7 +244,37 @@ const parse = (message: Record<string, any> | undefined): Record<string, any> =>
     },
   })
   const ran = parse(approved.find((m) => m.tool_call_id === 'n2'))
-  check('brain path: once approved, npm_run runs the script (without a shell)', ran.ok !== false && /> mark/.test(String(ran.output)) && fs.existsSync(path.join(repo, 'RAN')) && asked.length === 1 && /npm run mark/.test(asked[0] ?? ''), { ran, asked })
+  check('brain path: once approved, npm_run runs the script (without a shell)', ran.ok !== false && fs.existsSync(path.join(repo, 'RAN')) && asked.length === 1 && /npm run mark/.test(asked[0] ?? ''), { ran, asked })
+}
+
+// ── think() on the opt-in runAgent path (#56/#66) ──────────────────────────
+section('think(): legacy by default; the opt-in runAgent adapter is safe')
+{
+  const brainSource = fs.readFileSync(path.join(repoRoot, 'src/brain.ts'), 'utf8')
+  const gate = brainSource.slice(brainSource.indexOf('function isBrainNewPathEnabled'), brainSource.indexOf('function isBrainNewPathEnabled') + 300)
+  check('the runAgent-backed think() is opt-in (#66 reverted)', /return process\.env\.ARTEMIS_BRAIN_NEW === '1'/.test(gate), gate)
+  const ws = path.join(sandbox, 'adapter-ws')
+  fs.mkdirSync(ws, { recursive: true })
+  fs.writeFileSync(path.join(ws, 'hello.txt'), 'hi\n')
+  process.env.ARTEMIS_BRAIN_NEW = '1'
+  try {
+    const lines: string[] = []
+    const calls: string[] = []
+    let error: unknown
+    await runThinkWithToolCalls(ws, [{ id: 'r1', name: 'read_file', args: { path: 'hello.txt' } }], {
+      onToolLog: (message: string) => { lines.push(message) },
+      onToolCall: (name: string) => { calls.push(name) },
+    }).catch((e: unknown) => { error = e })
+    check('ARTEMIS_BRAIN_NEW=1: think() runs through runAgent without crashing (the session has its cwd)', error === undefined, error instanceof Error ? error.stack : String(error))
+    check('ARTEMIS_BRAIN_NEW=1: the [tool:] lines reach the caller', lines.some((line) => line.startsWith('[tool:read_file] running')) && calls.includes('read_file'), lines)
+    const controller = new AbortController()
+    controller.abort()
+    let stopped: unknown
+    const aborted = await runThinkWithToolCalls(ws, [{ id: 'r2', name: 'read_file', args: { path: 'hello.txt' } }], { abortSignal: controller.signal }).catch((e: unknown) => { stopped = e; return [] })
+    check('ARTEMIS_BRAIN_NEW=1: the caller\'s abortSignal stops the run (no tool runs)', aborted.length === 0, { stopped: String(stopped) })
+  } finally {
+    delete process.env.ARTEMIS_BRAIN_NEW
+  }
 }
 
 // ── A3: get_env ──────────────────────────────────────────────────────────────
