@@ -401,6 +401,22 @@ function buildDialogueBlock(dialogueLines: SagaDialogueLine[], subtitleMode: Sag
   ].join('\n');
 }
 
+const USER_BRIEF_HEADER = 'User brief (source material to render):';
+
+/**
+ * The user's brief inside a generation text built by
+ * buildDeterministicEnglishVisualPrompt: without the dialogue rules before it
+ * and the generation instructions after it. Any other text (an LLM rewrite)
+ * is returned as it is.
+ */
+export function userBriefOfGenerationText(text: string): string {
+  const trimmed = withoutLeadingDialogueBlock(text.trim());
+  if (!trimmed.startsWith(USER_BRIEF_HEADER)) return trimmed;
+  const brief = trimmed.slice(USER_BRIEF_HEADER.length);
+  const end = brief.indexOf('\n\nGeneration instruction language:');
+  return (end >= 0 ? brief.slice(0, end) : brief).trim();
+}
+
 function withoutLeadingDialogueBlock(text: string): string {
   return text.replace(/^Dialogue handling:\n(?:- [^\n]*\n)*/, '').trim();
 }
@@ -435,11 +451,11 @@ export function buildDeterministicEnglishVisualPrompt(input: {
   // before the user's own words or the dialogue rules ever do.
   const dialogueBlock = buildDialogueBlock(dialogueLines, input.subtitleMode, { compact: input.compact, markedDialogueOnly: input.markedDialogueOnly || input.compact });
   if (input.compact) {
-    return [dialogueBlock, 'User brief (source material to render):', input.originalText.trim()].join('\n');
+    return [dialogueBlock, USER_BRIEF_HEADER, input.originalText.trim()].join('\n');
   }
   return [
     dialogueBlock,
-    'User brief (source material to render):',
+    USER_BRIEF_HEADER,
     input.originalText.trim(),
     '',
     'Generation instruction language: English.',

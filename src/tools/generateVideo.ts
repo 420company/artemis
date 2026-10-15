@@ -42,6 +42,7 @@ import {
 } from './visual/providers/timeouts.js';
 import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
 import { DEFAULT_MODEL_IDS } from '../providers/presets.js';
+import { pollSleep } from './visual/pollSleep.js';
 
 const DEFAULT_MODEL = DEFAULT_MODEL_IDS.byteplusVideo;
 const DEFAULT_RATIO = '16:9';
@@ -162,34 +163,11 @@ async function localImagePathsToDataUrls(paths: string[] | undefined, context: T
   return dataUrls;
 }
 
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) {
-    throw new DOMException('The operation was aborted.', 'AbortError');
-  }
-}
-
 function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const active = signals.filter((signal): signal is AbortSignal => Boolean(signal));
   if (active.length === 0) return undefined;
   if (active.length === 1) return active[0];
   return AbortSignal.any(active);
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  throwIfAborted(signal);
-  return new Promise((resolve, reject) => {
-    const cleanup = () => signal?.removeEventListener('abort', onAbort);
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      cleanup();
-      reject(new DOMException('The operation was aborted.', 'AbortError'));
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
 }
 
 function resolveConfiguredVideoModel(action: GenerateVideoAction, configuredModel: string): string {
@@ -349,7 +327,7 @@ export async function executeGenerateVideo(
     let lastStatus = 'pending';
 
     for (let attempt = 0; attempt < maxPolls; attempt++) {
-      await sleep(pollIntervalMs, context.abortSignal);
+      await pollSleep(pollIntervalMs, context.abortSignal);
       const pollRes = await fetch(statusEndpoint, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: combineAbortSignals(context.abortSignal, AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS)),

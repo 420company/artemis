@@ -31,29 +31,17 @@ import {
   type ImagesApiRequestInput,
 } from '../imagesApiParams.js'
 import { DEFAULT_MODEL_IDS } from '../../../providers/presets.js'
+import { maxPollsFor, pollIntervalFor, pollSleep } from '../pollSleep.js'
+
+/** Status polls of a video task when the caller does not say: five minutes. */
+const DEFAULT_VIDEO_MAX_POLLS = 60
+const DEFAULT_VIDEO_POLL_INTERVAL_MS = 5000
 
 function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const active = signals.filter((signal): signal is AbortSignal => Boolean(signal))
   if (active.length === 0) return undefined
   if (active.length === 1) return active[0]
   return AbortSignal.any(active)
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'))
-  return new Promise((resolve, reject) => {
-    const cleanup = () => signal?.removeEventListener('abort', onAbort)
-    const timer = setTimeout(() => {
-      cleanup()
-      resolve()
-    }, ms)
-    const onAbort = () => {
-      clearTimeout(timer)
-      cleanup()
-      reject(new DOMException('The operation was aborted.', 'AbortError'))
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
 }
 
 export class BytePlusProvider implements VisualProvider {
@@ -441,11 +429,13 @@ export class BytePlusProvider implements VisualProvider {
       const statusEndpoint = modelArkEndpoint(baseUrl, `contents/generations/tasks/${encodeURIComponent(taskId)}`)
       let videoUrl: string | undefined
       let lastStatus = 'pending'
-      const maxPolls = 60
-      const pollIntervalMs = 5000
+      // What the caller asked for (Saga waits longer for a long clip), with
+      // a floor so a real task is never polled faster than once a second.
+      const maxPolls = maxPollsFor(params.maxPolls, DEFAULT_VIDEO_MAX_POLLS)
+      const pollIntervalMs = pollIntervalFor(params.pollIntervalMs, DEFAULT_VIDEO_POLL_INTERVAL_MS)
 
       for (let attempt = 0; attempt < maxPolls; attempt++) {
-        await sleep(pollIntervalMs, params.abortSignal)
+        await pollSleep(pollIntervalMs, params.abortSignal)
         
         const pollRes = await fetch(statusEndpoint, {
           headers: { Authorization: `Bearer ${apiKey}` },

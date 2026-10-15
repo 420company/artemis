@@ -48,7 +48,7 @@ import {
   type NarrativeLibraryEntry,
   type ShotViolation,
 } from './visual/sagaNarrative.js';
-import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
+import { normalizeSagaPromptForVideoGeneration, userBriefOfGenerationText } from './visual/sagaLanguageDirector.js';
 import { buildEnsembleContactSheet } from './visual/contactSheet.js';
 import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
 import {
@@ -73,6 +73,7 @@ import {
   packShotsIntoClips,
   planSegmentDurations,
   renderClipBeat,
+  restoreClipBeat,
   splitBeatText,
   splitLongShots,
   type ClipShotPart,
@@ -121,6 +122,13 @@ const DEFAULT_LONG_VIDEO_SUBDIR = 'long-videos';
 // accidentally override a longer provider wait with a shorter explicit value.
 // 420 polls × 10s = 70min per attempt.
 const MIN_SAGA_SEGMENT_MAX_POLLS = 420;
+
+let finalRenderSkippedForTests = false;
+
+/** Tests that read only the requests sent: stop once the segments exist, without the final render. */
+export function setSagaFinalRenderSkippedForTests(skip: boolean): void {
+  finalRenderSkippedForTests = skip;
+}
 
 function superVisualBypassReason(
   identitySource: SagaIdentitySource | undefined,
@@ -806,18 +814,31 @@ function looksLikeIdentityRuleBoilerplate(value: string | undefined): boolean {
   return IDENTITY_RULE_BOILERPLATE_PATTERNS.some((re) => re.test(normalized));
 }
 
-/** A motion timeline for one shot; `offset` places it inside a clip of several shots (times then count from the clip's start). */
-function motionTimelineFor(storyChunk: string, duration: number, index: number, offset?: number): string {
+const FALLBACK_ACTION_SETS = [
+  ['steps through the scene with a deliberate weight shift', 'turns the shoulders and reaches toward the next focal point', 'continues the gesture into the closing frame while fabric and hair keep moving'],
+  ['leans into motion and crosses the foreground plane', 'lifts one hand to interact with the scene element', 'releases the movement into drifting particles and a carried-through body turn'],
+  ['enters mid-stride with one foot already moving', 'rotates around the prop or light source with visible parallax', 'finishes in a moving silhouette that points into the next shot'],
+];
+
+/**
+ * The motion timeline of one shot: three timed movements. `offset` places it
+ * inside a clip of several shots (times then count from the clip's start and
+ * the lines are kept short, one movement each).
+ */
+function motionLinesFor(duration: number, index: number, offset?: number): string {
   const first = Math.max(1, Math.floor(duration * 0.35));
   const second = Math.max(first + 1, Math.floor(duration * 0.7));
-  const actionSets = [
-    ['steps through the scene with a deliberate weight shift', 'turns the shoulders and reaches toward the next focal point', 'continues the gesture into the closing frame while fabric and hair keep moving'],
-    ['leans into motion and crosses the foreground plane', 'lifts one hand to interact with the scene element', 'releases the movement into drifting particles and a carried-through body turn'],
-    ['enters mid-stride with one foot already moving', 'rotates around the prop or light source with visible parallax', 'finishes in a moving silhouette that points into the next shot'],
-  ];
-  const actions = actionSets[index % actionSets.length]!;
+  const actions = FALLBACK_ACTION_SETS[index % FALLBACK_ACTION_SETS.length]!;
   const at = (seconds: number) => String((offset ?? 0) + seconds);
-  return `${at(0)}–${at(first)}s: the protagonist ${actions[0]}; environmental motion remains continuous. ${at(first)}–${at(second)}s: the protagonist ${actions[1]}; camera tracks with natural parallax. ${at(second)}–${offset === undefined ? 'end' : `${at(duration)}s`}: the protagonist ${actions[2]}. Scene intent: ${storyChunk}`;
+  if (offset !== undefined) {
+    return `${at(0)}–${at(first)}s: the protagonist ${actions[0]}. ${at(first)}–${at(second)}s: ${actions[1]}. ${at(second)}–${at(duration)}s: ${actions[2]}.`;
+  }
+  return `${at(0)}–${at(first)}s: the protagonist ${actions[0]}; environmental motion remains continuous. ${at(first)}–${at(second)}s: the protagonist ${actions[1]}; camera tracks with natural parallax. ${at(second)}–end: the protagonist ${actions[2]}.`;
+}
+
+/** A motion timeline for one shot, then what the scene is about. */
+function motionTimelineFor(storyChunk: string, duration: number, index: number): string {
+  return `${motionLinesFor(duration, index)} Scene intent: ${storyChunk}`;
 }
 
 // Framings for the camera shots inside a long fallback clip, so a 30 s clip
@@ -826,8 +847,8 @@ const FALLBACK_SHOT_FRAMINGS = ['wide establishing shot', 'medium tracking shot'
 
 function buildMotionTimelineFallback(storyChunk: string, duration: number, index: number, multiShot: boolean): string {
   // On a model that cuts inside a clip, a clip longer than a natural shot is
-  // several camera shots cut together, each with its slice of the story
-  // first and its motion after it, shortened shot by shot to fit.
+  // several camera shots cut together, each with its motion and its slice of
+  // the story, shortened shot by shot to fit.
   const shots = multiShot ? naturalShotLengths(duration) : [duration];
   if (shots.length <= 1) return motionTimelineFor(storyChunk, duration, index);
   const slices = splitBeatText(storyChunk, shots.length, shots);
@@ -837,8 +858,10 @@ function buildMotionTimelineFallback(storyChunk: string, duration: number, index
     cursor += seconds;
     const framing = FALLBACK_SHOT_FRAMINGS[(index + shotIndex) % FALLBACK_SHOT_FRAMINGS.length]!;
     const slice = (slices[shotIndex] ?? storyChunk).replace(/^Continue the same moment[^:]*:\s*/, '');
-    const motion = motionTimelineFor('', seconds, index + shotIndex, start).replace(/\s*Scene intent:\s*$/, '');
-    return { marker: `${shotIndex > 0 ? 'Hard cut to ' : ''}Shot ${shotIndex + 1} (${start}–${cursor}s, ${framing}): `, body: `${slice} ${motion}` };
+    // The motion goes first: fitClipBeat keeps a shot's sentences in order,
+    // so the timeline survives and the story slice is what gets shortened.
+    const motion = motionLinesFor(seconds, index + shotIndex, start);
+    return { marker: `${shotIndex > 0 ? 'Hard cut to ' : ''}Shot ${shotIndex + 1} (${start}–${cursor}s, ${framing}): `, body: `${motion} ${slice}` };
   });
   return fitClipBeat(renderClipBeat(parts), clipBeatBudget(parts.length));
 }
@@ -925,8 +948,11 @@ function buildSegments(options: {
   promptOptions?: SegmentPromptOptions;
   /** The model cuts between camera shots inside a clip and the script is Artemis's own to shape. */
   multiShot?: boolean;
+  /** The user's story without the rules appended to it: where a segment without a planned shot takes its beat. */
+  fallbackStory?: string;
 }): SagaSegment[] {
-  const beats = sentenceChunks(options.story);
+  const sourceStory = options.fallbackStory?.trim() || options.story;
+  const beats = sentenceChunks(sourceStory);
   const plannedShots = Array.isArray(options.shots)
     ? options.shots.filter((shot) => shot && typeof shot === 'object')
     : [];
@@ -973,7 +999,7 @@ function buildSegments(options: {
     // into storyBeat / visualPrompt instead of writing actual scene content.
     // When detected, fall back to the story-derived chunk so the keyframe
     // generation has REAL action context to render.
-    const storyChunkFallback = trimToSentenceBoundary(beats.slice(start, end).join(' ') || options.story, 1800);
+    const storyChunkFallback = trimToSentenceBoundary(beats.slice(start, end).join(' ') || sourceStory, 1800);
     const rawPlannedStoryBeat = looksLikeIdentityRuleBoilerplate(planned?.storyBeat) ? undefined : planned?.storyBeat;
     const duration = usePlannedDurations
       ? (durations[index] ?? normalizeShotDuration(planned?.duration, options.preferredSegmentSeconds, options.maxSegmentSeconds))
@@ -1110,15 +1136,25 @@ export function isPollTimeoutErrorForTest(message: string | undefined): boolean 
   return /did not (?:finish|complete) within \d+ polls?|Last status:\s*(?:running|processing|pending|queued|submitted)/i.test(message);
 }
 
-function shouldPreserveUserScriptWithoutCriticRewrite(options: {
-  action: GenerateLongVideoAction;
-  timestampedStoryShots: SagaShotInput[];
+// A script the user wrote: a timed range with a unit ("0-5s", "3–8 秒",
+// "10-15 sec"), a range opening a line as a timeline position ("0-5: …",
+// "[0-5] …"), or Shot N / 镜头N / 第N段 markers. A bare number range ("waits
+// 3-4 minutes", "2019-2020") is not one.
+const USER_SCRIPT_MARKER_RE = /(?:^|\s|[[(（【])\d+(?:\.\d+)?\s*(?:s|秒|sec)?\s*[–—-]\s*\d+(?:\.\d+)?\s*(?:s|秒|secs?|seconds?)(?![a-z])|(?:^|\n)\s*[[(（【]?\s*\d{1,3}(?:\.\d+)?\s*[–—-]\s*\d{1,3}(?:\.\d+)?\s*[\])）】:：]|(?:^|\n|\s)(?:shot\s*\d+|镜头\s*\d+|第\s*\d+\s*(?:幕|段|镜头))/i;
+
+/**
+ * True when the brief is a script the user wrote: its shots are kept as
+ * written (no story rewrite, no shots packed into shared clips).
+ */
+export function shouldPreserveUserScriptWithoutCriticRewrite(options: {
+  action: Pick<GenerateLongVideoAction, 'preserveUserScript' | 'story' | 'prompt'>;
+  timestampedStoryShots: readonly unknown[];
 }): boolean {
   if (options.action.preserveUserScript === true) return true;
   if (options.timestampedStoryShots.length > 0) return true;
 
   const story = `${options.action.story ?? ''}\n${options.action.prompt ?? ''}`;
-  return /(?:^|\n|\s)(?:\d+(?:\.\d+)?\s*[–-]\s*\d+(?:\.\d+)?\s*s?|shot\s*\d+|镜头\s*\d+|第\s*\d+\s*(?:幕|段|镜头))/i.test(story);
+  return USER_SCRIPT_MARKER_RE.test(story);
 }
 
 function buildTransitionPlans(options: {
@@ -1377,6 +1413,11 @@ export async function executeGenerateLongVideo(
     // gets a note with its own lines, and the bible must not list every line
     // of the film as one segment's speech.
     story = languageNormalized.bodyText;
+    // The story as the user wrote it (with any storyboard summary): what a
+    // segment without a planned shot shows. What goes around it in `story`
+    // (the generation instructions, the story bible, the entity map,
+    // identity and reference notes) is rules for the model, never a beat.
+    let fallbackStory = userBriefOfGenerationText(story);
     toolLog(`🌐 generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
     // ALWAYS parse timestamped shots first. When the user supplied an explicit
     // [X-Y秒] timeline, that is the authoritative segmentation and takes
@@ -1449,6 +1490,7 @@ export async function executeGenerateLongVideo(
             parsed.globalStyle ? `Global style: ${parsed.globalStyle}` : '',
             parsed.globalContinuity ? `Global continuity: ${parsed.globalContinuity}` : '',
           ].filter(Boolean).join('\n');
+          if (parsed.summary) fallbackStory = `${fallbackStory}\n\n${parsed.summary}`;
           await writeFile(
             path.join(projectDir, 'storyboard-parse.json'),
             JSON.stringify({ source: 'vision', imagePath, parsed }, null, 2),
@@ -1750,6 +1792,7 @@ export async function executeGenerateLongVideo(
       toolWarn(`🛡️ 词汇护栏: story 中替换 ${storySanitizeDiff.length} 处敏感触发词 (${storySanitizeDiff.slice(0, 3).map((d) => `${d.from} → ${d.to}`).join('; ')}${storySanitizeDiff.length > 3 ? '; ...' : ''})。`);
     }
     story = sanitizeForVideoProvider(story);
+    fallbackStory = sanitizeForVideoProvider(fallbackStory);
     const { shotContinuityNotes, shotCameraNotes } = deriveContinuityFromShots(action);
     const sceneAnchors = mergeStringArrays(
       action.continuity?.locations,
@@ -1871,6 +1914,7 @@ export async function executeGenerateLongVideo(
       promptMaxChars: segmentPromptMaxChars,
       promptOptions: segmentPromptOptions,
       multiShot: multiShotClips,
+      fallbackStory,
     });
     superVisualImageBudget.raiseLimit(superVisualImageLimit(segments.length));
     const segmentStarts = segmentStartSeconds(segments.map((segment, index) => ({ duration: segment.duration, timecodeStart: sanitizedShots?.[index]?.timecodeStart })));
@@ -1923,7 +1967,8 @@ export async function executeGenerateLongVideo(
               toolLog(`✏️  剧情检查：shot ${seg.index} 已重写 (round ${round}) — ${rewrite.storyBeat.slice(0, 80)}...`);
               // Sanitize rewriter output too — the LLM may reintroduce
               // trigger words even when the original storyBeat was clean.
-              seg.storyBeat = sanitizeForVideoProvider(rewrite.storyBeat);
+              // A clip of several shots keeps its opening line and markers.
+              seg.storyBeat = restoreClipBeat(seg.storyBeat, sanitizeForVideoProvider(rewrite.storyBeat));
               seg.visualPrompt = sanitizeForVideoProvider(rewrite.visualPrompt);
               if (rewrite.transition) seg.transition = sanitizeForVideoProvider(rewrite.transition);
               // Recompile compiled prompts so the new storyBeat actually reaches BytePlus
@@ -2469,6 +2514,10 @@ export async function executeGenerateLongVideo(
         const framed = await extractLastFrame({ videoPath: segment.outputPath, outputPath: framePath });
         previousLastFramePath = framed.ok ? framed.framePath : undefined;
       }
+    }
+
+    if (finalRenderSkippedForTests) {
+      return { action, ok: true, output: `Long video: ${segments.length} segments generated; the final render was skipped.` };
     }
 
     const segmentProbes = await Promise.all(segments.map((segment) => probeSegment(segment.outputPath)));

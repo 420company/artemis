@@ -10,6 +10,7 @@ import {
   resolveVideoModelProfile,
   videoCapabilityOverridesFromConfig,
   type VideoModelProfile,
+  type VideoReferenceKind,
 } from './videoCapabilities.js';
 import {
   analyzeNarrative,
@@ -64,6 +65,8 @@ type SeedanceWorkflowState = {
   /** The configured multimodal video model and the clip lengths offered for it. */
   model: string;
   clipChoices: number[];
+  /** Reference kinds the current model takes; others are dropped, with a note to the user. */
+  referenceInputs: readonly VideoReferenceKind[];
   generateAudio: boolean;
   locale: UiLocale;
   deliveryPlatform?: 'telegram' | 'discord' | 'wechat' | 'all';
@@ -246,7 +249,10 @@ async function classifyReferenceUrls(
   };
 }
 
-function mergeReferences(state: SeedanceWorkflowState, refs: ExtractedReferences): void {
+type DroppedReferences = Record<VideoReferenceKind, number>;
+
+/** Adds the references the current model takes; returns how many of each other kind were left out. */
+function mergeReferences(state: SeedanceWorkflowState, refs: ExtractedReferences): DroppedReferences {
   state.referenceImageUrls = unique([...state.referenceImageUrls, ...refs.imageUrls]);
   state.referenceVideoUrls = unique([...state.referenceVideoUrls, ...refs.videoUrls]);
   state.referenceAudioUrls = unique([...state.referenceAudioUrls, ...refs.audioUrls]);
@@ -254,6 +260,54 @@ function mergeReferences(state: SeedanceWorkflowState, refs: ExtractedReferences
   state.referenceVideoPaths = unique([...state.referenceVideoPaths, ...refs.videoPaths]);
   state.referenceAudioPaths = unique([...state.referenceAudioPaths, ...refs.audioPaths]);
   state.updatedAt = Date.now();
+  return dropUnsupportedReferences(state);
+}
+
+/** Removes the references of kinds the current model does not take; returns how many of each went. */
+function dropUnsupportedReferences(state: SeedanceWorkflowState): DroppedReferences {
+  const dropped: DroppedReferences = { image: 0, video: 0, audio: 0 };
+  const removed: string[] = [];
+  const takes = (kind: VideoReferenceKind) => state.referenceInputs.includes(kind);
+  if (!takes('image')) {
+    dropped.image = state.referenceImageUrls.length + state.referenceImagePaths.length;
+    removed.push(...state.referenceImageUrls, ...state.referenceImagePaths);
+    state.referenceImageUrls = [];
+    state.referenceImagePaths = [];
+  }
+  if (!takes('video')) {
+    dropped.video = state.referenceVideoUrls.length + state.referenceVideoPaths.length;
+    removed.push(...state.referenceVideoUrls, ...state.referenceVideoPaths);
+    state.referenceVideoUrls = [];
+    state.referenceVideoPaths = [];
+  }
+  if (!takes('audio')) {
+    dropped.audio = state.referenceAudioUrls.length + state.referenceAudioPaths.length;
+    removed.push(...state.referenceAudioUrls, ...state.referenceAudioPaths);
+    state.referenceAudioUrls = [];
+    state.referenceAudioPaths = [];
+  }
+  // The request text no longer names them either, so they are not passed on.
+  for (const item of removed) state.prompt = compact(state.prompt.split(item).join(' '));
+  return dropped;
+}
+
+const REFERENCE_KIND_NAMES: Record<VideoReferenceKind, { zh: string; en: string }> = {
+  image: { zh: '图片', en: 'image' },
+  video: { zh: '视频', en: 'video' },
+  audio: { zh: '音频', en: 'audio' },
+};
+
+/** What the user is told when references were left out: the kinds the video service takes now and what was removed. */
+function droppedReferencesNote(state: SeedanceWorkflowState, dropped: DroppedReferences, changed: boolean): string | undefined {
+  const kinds = (['image', 'video', 'audio'] as const).filter((kind) => dropped[kind] > 0);
+  if (kinds.length === 0) return undefined;
+  const takes = state.referenceInputs.filter((kind) => kind in REFERENCE_KIND_NAMES);
+  const zhTakes = takes.length > 0 ? `现在只能使用${takes.map((kind) => REFERENCE_KIND_NAMES[kind].zh).join('、')}参考` : '现在不能使用参考素材';
+  const enTakes = takes.length > 0 ? `now takes only ${takes.map((kind) => REFERENCE_KIND_NAMES[kind].en).join(' and ')} references` : 'now takes no references';
+  return pickLocale(state.locale, {
+    zh: `ℹ️ ${changed ? '视频服务已更新，' : '当前视频服务'}${zhTakes}，已移除${kinds.map((kind) => `${REFERENCE_KIND_NAMES[kind].zh} ${dropped[kind]} 个`).join('、')}，其余素材照常使用。`,
+    en: `ℹ️ ${changed ? 'The video service changed and' : 'The video service'} ${enTakes}; removed ${kinds.map((kind) => `${dropped[kind]} ${REFERENCE_KIND_NAMES[kind].en}`).join(' and ')} reference${kinds.reduce((sum, kind) => sum + dropped[kind], 0) === 1 ? '' : 's'}. Everything else is used as before.`,
+  });
 }
 
 function referenceCount(state: SeedanceWorkflowState): number {
@@ -531,7 +585,7 @@ function buildGenerationPrompt(state: SeedanceWorkflowState): string {
 }
 
 /** The configured model when it is a multimodal Seedance 2.x model (2.0 Pro or 2.5), with its clip choices. */
-async function multimodalVideoModel(cwd: string): Promise<{ model: string; clipChoices: number[] } | undefined> {
+async function multimodalVideoModel(cwd: string): Promise<{ model: string; clipChoices: number[]; referenceInputs: readonly VideoReferenceKind[] } | undefined> {
   const configured = await resolveConfiguredVisualProvider(cwd, 'video');
   if (!configured) return undefined;
   if (!isBytePlusProvider(configured.config.video.provider)) return undefined;
@@ -539,25 +593,39 @@ async function multimodalVideoModel(cwd: string): Promise<{ model: string; clipC
   if (model !== BYTEPLUS_SEEDANCE_2_PRO_MODEL && !isSeedance25Model(model)) return undefined;
   const profile = resolveVideoModelProfile(configured.config.video.provider, model, videoCapabilityOverridesFromConfig(configured.config));
   const multimodal = ['image', 'video', 'audio'].every((kind) => profile.referenceInputs.includes(kind as 'image'));
-  return multimodal ? { model, clipChoices: singleClipChoices(profile) } : undefined;
+  return multimodal ? { model, clipChoices: singleClipChoices(profile), referenceInputs: profile.referenceInputs } : undefined;
 }
 
 /**
- * The current video model and its clip lengths for a wizard in progress: the
- * model can change while the wizard waits (a new tier is synced into
- * providers.json), and the clip is made with the model configured now,
- * whatever it is, never longer than it renders. A length chosen earlier
- * becomes the longest the new model offers that is not longer.
+ * The current video model, its clip lengths and the references it takes, for
+ * a wizard in progress: the model can change while the wizard waits (a new
+ * tier is synced into providers.json), and the clip is made with the model
+ * configured now, whatever it is, never longer than it renders. A length
+ * chosen earlier becomes the longest the new model offers that is not
+ * longer; references of kinds it does not take, and generated sound it
+ * cannot make, are dropped. Returns what the user is told about that.
  */
-async function refreshClipModel(state: SeedanceWorkflowState): Promise<void> {
+async function refreshClipModel(state: SeedanceWorkflowState): Promise<string | undefined> {
   const profile = await resolveActiveVideoProfile(state.cwd).catch(() => undefined);
-  if (!profile?.model) return;
+  if (!profile?.model) return undefined;
+  const changed = profile.model !== state.model;
   const choices = singleClipChoices(profile);
   state.model = profile.model;
   state.clipChoices = choices;
   if (state.duration !== undefined && !choices.includes(state.duration)) {
     state.duration = [...choices].reverse().find((value) => value <= state.duration!) ?? choices[0];
   }
+  state.referenceInputs = profile.referenceInputs;
+  const notes = [droppedReferencesNote(state, dropUnsupportedReferences(state), changed)];
+  if (!profile.canGenerateAudio && state.generateAudio) {
+    state.generateAudio = false;
+    notes.push(pickLocale(state.locale, {
+      zh: 'ℹ️ 当前视频服务不能生成声音，这次会做成无声视频。',
+      en: 'ℹ️ The video service cannot make sound now, so this video will be silent.',
+    }));
+  }
+  const note = notes.filter(Boolean).join('\n');
+  return note || undefined;
 }
 
 export async function handleSeedanceMultimodalWorkflow(
@@ -574,7 +642,7 @@ export async function handleSeedanceMultimodalWorkflow(
 
   if (state) {
     if (input.locale) state.locale = input.locale;
-    await refreshClipModel(state);
+    const switchNote = await refreshClipModel(state);
 
     if (CANCEL_RE.test(text)) {
       WORKFLOWS.delete(key);
@@ -590,6 +658,14 @@ export async function handleSeedanceMultimodalWorkflow(
     if (isSeedanceWorkflowSupportDiscussion(text)) {
       WORKFLOWS.delete(key);
       return { handled: false };
+    }
+
+    // The model changed under the wizard and some references or the sound
+    // had to go: say so before anything is generated, and ask again.
+    if (switchNote && state.stage !== 'choosing_dream_source') {
+      state.updatedAt = Date.now();
+      const ask = state.stage === 'choosing_duration' ? buildDurationMessage(state) : buildCollectingMessage(state, false);
+      return { handled: true, reply: `${switchNote}\n\n${ask}` };
     }
 
     if (state.stage === 'choosing_dream_source') {
@@ -632,7 +708,10 @@ export async function handleSeedanceMultimodalWorkflow(
     }
 
     if (state.stage === 'choosing_duration') {
-      mergeReferences(state, refs);
+      const droppedNote = droppedReferencesNote(state, mergeReferences(state, refs), false);
+      if (droppedNote) {
+        return { handled: true, reply: `${droppedNote}\n\n${buildDurationMessage(state)}` };
+      }
       const rawDuration = extractRawDuration(text);
       if (!rawDuration && !wantsAudio(text) && !wantsSilence(text)) {
         return { handled: true, reply: buildDurationMessage(state) };
@@ -649,7 +728,7 @@ export async function handleSeedanceMultimodalWorkflow(
       return { handled: false, prompt: buildGenerationPrompt(state) };
     }
 
-    mergeReferences(state, refs);
+    const droppedNote = droppedReferencesNote(state, mergeReferences(state, refs), false);
     if (text && !START_RE.test(text) && !isDirectGenerateIntent(text) && !hasUsableRefs && !CONFIRM_RE.test(text)) {
       state.prompt = compact(`${state.prompt}\n${text}`);
     }
@@ -657,10 +736,10 @@ export async function handleSeedanceMultimodalWorkflow(
     if (START_RE.test(text) || isDirectGenerateIntent(text)) {
       state.stage = 'choosing_duration';
       state.updatedAt = Date.now();
-      return { handled: true, reply: buildDurationMessage(state) };
+      return { handled: true, reply: [droppedNote, buildDurationMessage(state)].filter(Boolean).join('\n\n') };
     }
 
-    return { handled: true, reply: buildCollectingMessage(state, hasUnusableAttachment) };
+    return { handled: true, reply: [droppedNote, buildCollectingMessage(state, hasUnusableAttachment)].filter(Boolean).join('\n\n') };
   }
 
   if (!isExplicitSeedanceVideoRequest(text)) {
@@ -688,6 +767,7 @@ export async function handleSeedanceMultimodalWorkflow(
     referenceAudioPaths: refs.audioPaths,
     model: videoModel.model,
     clipChoices: videoModel.clipChoices,
+    referenceInputs: videoModel.referenceInputs,
     generateAudio: !wantsSilence(text),
     locale: input.locale ?? DEFAULT_UI_LOCALE,
     deliveryPlatform: input.deliveryPlatform,

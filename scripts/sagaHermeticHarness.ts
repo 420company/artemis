@@ -12,7 +12,10 @@ process.env.ARTEMIS_HOME = path.join(root, 'home');
 process.env.ARTEMIS_MEDIA_OUTPUT_ROOT = path.join(root, 'media');
 
 const { ProviderStore } = await import('../src/providers/store.js');
-const { executeGenerateLongVideo } = await import('../src/tools/generateLongVideo.js');
+const { executeGenerateLongVideo, setSagaFinalRenderSkippedForTests } = await import('../src/tools/generateLongVideo.js');
+const { setPollSleepForTests } = await import('../src/tools/visual/pollSleep.js');
+// A mocked task is finished when it is first read: no wait between polls.
+setPollSleepForTests(async () => {});
 const {
   setAssetDownloadResolverForTests,
   setAssetDownloadTransportForTests,
@@ -40,6 +43,8 @@ export type HermeticOptions = {
   videoCapabilities?: Record<string, unknown>;
   /** The configured video model id (default: the 2.0 id). */
   videoModel?: string;
+  /** false: stop once the segments are generated (for tests that read only the requests). Default true. */
+  render?: boolean;
 };
 
 const fixtureDir = path.join(root, 'fixtures');
@@ -208,6 +213,7 @@ export async function runHermeticSaga(
   const { withRuntimeLogSink } = await import('../src/utils/log.js');
   return withHermeticWorkspace(options, async (cwd, requests) => {
     const logs: string[] = [];
+    setSagaFinalRenderSkippedForTests(options.render === false);
     const result = await withRuntimeLogSink(
       (entry) => { logs.push(entry.message); },
       () => executeGenerateLongVideo(
@@ -216,7 +222,7 @@ export async function runHermeticSaga(
         // CLI and the agent server are when the user allows it.
         { cwd, permissionMode: 'full-access', sessionId: 'saga-hermetic', locale: 'en', requestWorkspaceSwitch: async () => true, ...contextOverrides(cwd) } as any,
       ),
-    );
+    ).finally(() => setSagaFinalRenderSkippedForTests(false));
     return { result, requests, logs };
   });
 }
