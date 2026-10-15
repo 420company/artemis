@@ -2718,8 +2718,8 @@ export type ToolLoadTier = 'core' | 'ondemand';
 
 /**
  * Tools always rendered in full in the manifest. Everything else is
- * 'ondemand' and (once phase 2 switches the system prompt to core-only)
- * is listed by name + one-line summary, fetched via `load_tools`.
+ * 'ondemand'; only with the lazy-loading opt-in (ARTEMIS_LAZY_TOOLS=1) is it
+ * listed by name + one-line summary and fetched via `load_tools`.
  */
 export const CORE_TOOL_TYPES: ReadonlySet<string> = new Set<string>([
   // File basics
@@ -2837,14 +2837,19 @@ export function getCoreToolTypesForProfile(profile: string): ReadonlySet<string>
   return READONLY_CORE_TOOL_TYPES;
 }
 
+/** Explicit opt-in for the (not yet end-to-end) lazy tool loading. */
+export const LAZY_TOOLS_ENV = 'ARTEMIS_LAZY_TOOLS';
+
 /**
- * WP-18 phase 2: resolve the manifest tier.
+ * Resolve the manifest tier.
  *
- * Default is 'core' (core-only mode). Set ARTEMIS_ALL_TOOLS=1 to fall back
- * to the legacy 'all' mode (every tool rendered in full) for debugging.
+ * Default is 'all': every tool the profile may call is rendered in full.
+ * Lazy loading (core tools in full, the rest by name, fetched with
+ * `load_tools`) stays dormant until it works end to end; it is used only
+ * when ARTEMIS_LAZY_TOOLS=1 is set explicitly.
  */
 export function resolveToolManifestTier(): 'core' | 'all' {
-  return process.env.ARTEMIS_ALL_TOOLS === '1' ? 'all' : 'core';
+  return process.env[LAZY_TOOLS_ENV] === '1' ? 'core' : 'all';
 }
 
 /** First sentence of a description, whitespace-collapsed, truncated to 120 chars. */
@@ -2863,18 +2868,22 @@ function toAllowedTypeSet(allowedToolTypes?: Iterable<string> | null): ReadonlyS
 
 /**
  * On-demand tools that would appear in the model manifest, as type + one-line summary.
- * Optional `allowedToolTypes` restricts the result to a profile's allowed set.
+ * Optional `allowedToolTypes` restricts the result to a profile's allowed set;
+ * `profile` picks the core set (getCoreToolTypesForProfile) that is left out
+ * because it is already rendered in full.
  */
 export function getOnDemandToolSummaries(
   allowedToolTypes?: Iterable<string> | null,
+  profile = 'main',
 ): Array<{ type: string; description: string }> {
   const allowed = toAllowedTypeSet(allowedToolTypes);
+  const profileCore = getCoreToolTypesForProfile(profile);
   const seen = new Set<string>();
   const summaries: Array<{ type: string; description: string }> = [];
   for (const def of toolDefs) {
     if (seen.has(def.type)) continue;
     seen.add(def.type);
-    if (isCoreTool(def.type)) continue;
+    if (profileCore.has(def.type)) continue;
     if (!isListedInModelManifest(def)) continue;
     if (allowed && !allowed.has(def.type)) continue;
     summaries.push({ type: def.type, description: summarizeToolDescription(def.description) });
@@ -3022,8 +3031,8 @@ export function renderDetailedToolManifest(
 export interface RenderToolManifestOptions {
   /**
    * 'core' (default) renders core tools in full + on-demand summaries.
-   * 'all' keeps legacy behavior (every tool in full). When unset, resolved
-   * via resolveToolManifestTier() (ARTEMIS_ALL_TOOLS=1 forces 'all').
+   * 'all' renders every tool in full. When unset, resolved via
+   * resolveToolManifestTier() ('all' unless ARTEMIS_LAZY_TOOLS=1).
    */
   loadTier?: 'core' | 'all';
   /** Execution profile for profile-specific core filtering. Defaults to 'main'. */
@@ -3048,11 +3057,12 @@ export function renderToolManifest(
 
   const coreManifest = renderDetailedToolManifest(coreTypes);
 
-  // Without load_tools available, an on-demand list would be unusable noise.
+  // Without load_tools the model could never reach an on-demand tool, so the
+  // full manifest is the only safe one.
   const loaderAvailable = !allowed || allowed.has(LOAD_TOOLS_TYPE);
-  if (!loaderAvailable) return coreManifest;
+  if (!loaderAvailable) return renderDetailedToolManifest(allowedToolTypes);
 
-  const onDemand = getOnDemandToolSummaries(allowed);
+  const onDemand = getOnDemandToolSummaries(allowed, options.profile ?? 'main');
   if (onDemand.length === 0) return coreManifest;
 
   const onDemandLines = onDemand.map((tool) => `- ${tool.type}: ${tool.description}`);
