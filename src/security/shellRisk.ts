@@ -201,7 +201,8 @@ export function shellCommands(command: string): ShellCommand[] {
 
 function isWithin(root: string, target: string): boolean {
   const relative = path.relative(root, target)
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))
+  // `..` as a whole first segment (a name such as `..x` is inside).
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
 }
 
 /** Inside the workspace, through symlinks on both sides. */
@@ -340,7 +341,7 @@ const LOCKOUT: ShellRisk = { reason: 'could cut off access to this machine or de
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
 /** Wrappers that run the command after their own options, and which of those options take a value. */
 const WRAPPER_OPTIONS: Record<string, RegExp> = {
-  sudo: /^-[ugCphUrtD]$|^--(?:chdir|user|group|host|prompt|role|type|other-user|close-from|command-timeout)$/,
+  sudo: /^-[ugCphUrtDRT]$|^--(?:chdir|chroot|user|group|host|prompt|role|type|other-user|close-from|command-timeout)$/,
   doas: /^-[uC]$/,
   env: /^-[uC]$|^--(?:unset|chdir)$/,
   nice: /^-n$/,
@@ -358,13 +359,29 @@ const WRAPPER_OPTIONS: Record<string, RegExp> = {
 }
 
 /** Short options of a wrapper that take a value, also as the last letter of a cluster (`env -iC DIR`, `sudo -nu root`). */
-const WRAPPER_VALUE_LETTERS: Record<string, string> = { sudo: 'ugCphUrtD', doas: 'uC', env: 'uC' }
+const WRAPPER_VALUE_LETTERS: Record<string, string> = { sudo: 'ugCphUrtDRT', doas: 'uC', env: 'uC' }
+/** Long options a wrapper takes; getopt_long accepts any unambiguous start of one (`sudo --logi`, `env --chd`). */
+const WRAPPER_LONG_OPTIONS: Record<string, string[]> = {
+  sudo: ['askpass', 'background', 'bell', 'chdir', 'chroot', 'close-from', 'command-timeout', 'edit', 'group', 'help', 'host', 'list', 'login', 'non-interactive', 'other-user', 'preserve-env', 'preserve-groups', 'prompt', 'remove-timestamp', 'reset-timestamp', 'role', 'set-home', 'shell', 'stdin', 'type', 'user', 'validate', 'version'],
+  env: ['argv0', 'block-signal', 'chdir', 'debug', 'default-signal', 'help', 'ignore-environment', 'ignore-signal', 'list-signal-handling', 'null', 'split-string', 'unset', 'version'],
+}
+
+/** A wrapper's long option spelled out in full (`--logi` → `--login`, `--chd=x` → `--chdir=x`); as written when not one. */
+function fullLongOption(name: string, word: string): string {
+  const options = WRAPPER_LONG_OPTIONS[name]
+  if (!options || !word.startsWith('--') || word === '--') return word
+  const eq = word.indexOf('=')
+  const given = (eq > 0 ? word.slice(2, eq) : word.slice(2))
+  if (options.includes(given)) return word
+  const matches = options.filter((o) => o.startsWith(given))
+  return matches.length === 1 ? `--${matches[0]}${eq > 0 ? word.slice(eq) : ''}` : word
+}
 /** The wrappers that change the directory of what they run, and their option letter (`env -C DIR`, `sudo -D DIR`, both `--chdir`). */
 const WRAPPER_CHDIR_LETTER: Record<string, string> = { env: 'C', sudo: 'D' }
 
 /** How many words a wrapper's option takes (itself, and its value when that is the next word). */
 function wrapperOptionWidth(name: string, word: string, takesValue: RegExp): number {
-  if (takesValue.test(word)) return 2
+  if (takesValue.test(fullLongOption(name, word))) return 2
   const letters = WRAPPER_VALUE_LETTERS[name]
   return letters && /^-[A-Za-z]{2,}$/.test(word) && letters.includes(word.at(-1)!) ? 2 : 1
 }
@@ -408,10 +425,10 @@ export function wrapperDirectoryChanges(words: string[]): (string | undefined)[]
     const letter = WRAPPER_CHDIR_LETTER[name]
     i++
     while (i < words.length && /^-/.test(words[i]!) && words[i] !== '--') {
-      const a = words[i]!
+      const a = fullLongOption(name, words[i]!)
       let width = wrapperOptionWidth(name, a, takesValue)
-      // sudo -i / --login runs a login shell in the target user's home: where is not known here.
-      if (name === 'sudo' && a === '--login') out.push(undefined)
+      // sudo -i / --login runs a login shell in the target user's home, and -R / --chroot a new root: where is not known here.
+      if (name === 'sudo' && (a === '--login' || a === '--chroot' || a.startsWith('--chroot='))) out.push(undefined)
       if (letter) {
         let value: string | undefined
         let named = false
@@ -437,6 +454,11 @@ export function wrapperDirectoryChanges(words: string[]): (string | undefined)[]
             if (name === 'sudo' && ch === 'i') {
               out.push(undefined)
               continue
+            }
+            if (name === 'sudo' && ch === 'R') {
+              out.push(undefined)
+              width = c + 1 < a.length ? 1 : 2
+              break
             }
             if (valued.includes(ch)) break
           }
@@ -563,6 +585,8 @@ export function describeRuntimeBuiltCommand(command: string): ShellRisk | null {
       if (segment.heredoc && (SHELL_NAME.test(name) ? fromStdin : fromStdin && !segment.heredoc.quoted && /\$\(|`/.test(segment.heredoc.body))) return builtRisk(command)
       if (segment.heredoc && fromStdin && INLINE_DECODE_EXEC.test(segment.heredoc.body)) return RUN_DECODED
     }
+    // `echo "…" | at now`, `… | batch`, `… | expect`, `at now < file`: what was read becomes commands that run.
+    if ((name === 'at' || name === 'batch' || name === 'expect') && (segment.join === 'pipe' || segment.join === 'procsub-out' || args.some((a) => /^\d*<(?!<)/.test(a)) || args.includes('-f') || (name === 'expect' && args.includes('-')))) return builtRisk(command)
     // `… | xargs sh -c`, `parallel bash`, `find -exec sh -c`: what was read becomes shell code.
     if ((name === 'xargs' || name === 'parallel' || name === 'find') && args.some((a) => SHELL_NAME.test(path.basename(a)))) return builtRisk(command)
   }
@@ -847,9 +871,15 @@ const RUNNERS = new Set([
   'entr', 'watchexec', 'nodemon', 'dtach', 'abduco', 'nq', 'tsp', 'pueue', 'sem', 'expect', 'sshpass',
 ])
 /** A word that deletes, writes or serves when it runs, anywhere in a runner's arguments (also inside a quoted string). */
-const RUN_WORD = /(?:^|[\s;&|(){}'"`])(?:rm|rmdir|unlink|shred|srm|wipe|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate)(?=$|[\s;&|)}'"`])|>|\bhttp\.server\b|\bSimpleHTTPServer\b|(?:^|[\s;&|'"`])php\b[^;&|]*\s-S|\bhttp-server\b|(?:^|[\s;&|'"`])serve(?=$|\s)|\bhttpd\b/
+const RUN_WORD = /(?:^|[\s;&|(){}'"`])(?:[\w.~+-]*\/)*(?:rm|rmdir|unlink|shred|srm|wipe|trash|trash-put|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|sed|curl|wget|aria2c|yt-dlp|youtube-dl|axel|rsync|git|find|xargs)(?=$|[\s;&|)}'"`])|>/
+/** A web server word in a runner's arguments (left to listeningServers for the runners it reads into). */
+const RUN_SERVER_WORD = /\bhttp\.server\b|\bSimpleHTTPServer\b|(?:^|[\s;&|'"`/])php\b[^;&|]*\s-S|\bhttp-server\b|(?:^|[\s;&|'"`/])serve(?=$|\s)|\bhttpd\b/
+/** Runners whose command analyzeDeletes reads itself (unwrapRunner), in the directory it runs in. */
+const READ_INTO_RUNNERS = new Set(['su', 'runuser', 'flock', 'systemd-run'])
+/** A command name that deletes, writes or runs others, as xargs's command. */
+const XARGS_RISKY = /^(?:rm|rmdir|unlink|shred|srm|wipe|trash|trash-put|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|sed|curl|wget|aria2c|rsync|git|find|xargs|env|sudo|doas|perl|ruby|php|node|deno|bun|lua|python[0-9.]*|(?:ba|z|k|da)?sh)$/
 /** The same as a command of its own: the first operand, or the start of a string (or a part after ;, &, |). */
-const RUN_WORD_AT_START = /^(?:rm|rmdir|unlink|shred|srm|wipe|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|httpd|http-server|serve)$|(?:^|[;&|]\s*)(?:rm|rmdir|unlink|shred|srm|wipe|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|http-server|serve|httpd)\s|\bhttp\.server\b|\bSimpleHTTPServer\b|(?:^|[;&|]\s*)php\b[^;&|]*\s-S|>/
+const RUN_WORD_AT_START = /^(?:[\w.~+-]*\/)*(?:rm|rmdir|unlink|shred|srm|wipe|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|httpd|http-server|serve)$|(?:^|[;&|]\s*)(?:[\w.~+-]*\/)*(?:rm|rmdir|unlink|shred|srm|wipe|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|http-server|serve|httpd)\s|\bhttp\.server\b|\bSimpleHTTPServer\b|(?:^|[;&|]\s*)php\b[^;&|]*\s-S|>/
 /**
  * Commands whose arguments are data, not a command they run: for any other
  * (an unknown program or a script), a command word at the start of an
@@ -864,7 +894,7 @@ const KNOWN_COMMANDS = new Set([
   'ffmpeg', 'ffprobe', 'convert', 'magick', 'identify', 'pdftotext', 'pdfinfo', 'blender', 'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'xz',
   'zcat', 'ps', 'top', 'kill', 'pkill', 'pgrep', 'lsof', 'ss', 'netstat', 'ip', 'ping', 'dig', 'nslookup', 'host', 'curl', 'wget', 'ssh',
   'scp', 'rsync', 'sftp', 'export', 'set', 'unset', 'source', '.', 'exit', 'return', 'read', 'wait', 'history', 'alias', 'local', 'declare',
-  'seq', 'yes', 'expr', 'bc', 'awk', 'gawk', 'mawk', 'nawk', 'sed', 'find', 'xargs', 'tee', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'chmod',
+  'seq', 'yes', 'expr', 'bc', 'awk', 'gawk', 'mawk', 'nawk', 'sed', 'find', 'tee', 'cp', 'mv', 'rm', 'rmdir', 'ln', 'chmod',
   'chown', 'chgrp', 'install', 'truncate', 'shred', 'dd', 'unlink', 'systemctl', 'journalctl', 'docker', 'kubectl', 'openssl', 'sqlite3',
   'psql', 'mysql', 'redis-cli', 'code', 'open', 'xdg-open', 'vim', 'vi', 'nvim', 'nano', 'emacs', 'make', 'cmake', 'java', 'javac', 'mvn',
   'gradle', 'dotnet', 'php', 'composer', 'ruby', 'gem', 'bundle', 'perl', 'node', 'deno', 'python', 'python3', 'lua', 'R', 'Rscript', 'aria2c',
@@ -879,7 +909,7 @@ const AWK_RUNS_SHELL = /\bsystem\s*\(|\|\s*"|"\s*\|\s*getline|\|&/
 const INTERPRETER_RE = new RegExp(`^${INTERPRETERS}$`, 'i')
 /** Destructive operations anywhere in a command, including inline code. */
 export const DESTRUCTIVE_TOKEN =
-  /\b(?:rm|rmdir|unlink|shred|srm|wipe|trash(?:-put)?|mv|truncate|dd)\b|\b(?:remove|removedirs|delete|unlink|rmtree|rmSync|rmdirSync|unlinkSync|truncate|truncateSync|writeFileSync|rename|renameSync|move)\s*\(|FileUtils\.rm|:\s*>|(?:^|[^<>0-9&=-])>>?(?!&)|\bgit\s+clean\b|--delete\b|\bof=|\bopen\s*\([^)]*,\s*['"][^'"]*[wax+]|\.write_(?:text|bytes)\s*\(/
+  /\b(?:rm|rmdir|unlink|shred|srm|wipe|trash(?:-put)?|mv|truncate|dd)\b|\b(?:remove|removedirs|delete|unlink|rmtree|rmSync|rmdirSync|unlinkSync|truncate|truncateSync|writeFileSync|rename|renameSync|move)\s*\(|FileUtils\.rm|:\s*>|(?:^|[^<>0-9&=-])>>?(?!&)|\bgit\s+clean\b|--?delete\b|\bof=|\bopen\s*\([^)]*,\s*['"][^'"]*[wax+]|\.write_(?:text|bytes)\s*\(/
 /** Places whose files run later on their own: login scripts, autostart entries, services, cron, SSH keys. */
 const STARTUP_PATH =
   /(?:^|\/)(?:\.bashrc|\.bash_profile|\.bash_login|\.profile|\.zshrc|\.zprofile|\.zshenv|\.xprofile|\.xinitrc|\.config\/autostart\/|\.config\/systemd\/|\.config\/fish\/|\.local\/share\/applications\/|\.ssh\/)|^\/etc\/(?:profile|bash\.bashrc|cron|systemd\/|init\.d\/|rc\.local|xdg\/autostart\/|sudoers)|^\/var\/spool\/cron\//
@@ -957,7 +987,7 @@ export function withoutHeredocBodies(command: string): string {
   return out.join('\n')
 }
 
-export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis {
+export function analyzeDeletes(fullCommand: string, cwd: string, depth = 0): DeleteAnalysis {
   const outside = new Set<string>()
   let unverifiable: string | undefined
   let unverifiableZh: string | undefined
@@ -990,6 +1020,12 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
     const resolvedWord = staticPath(raw)
     if (resolvedWord === undefined) {
       flag('target not known before it runs', '目标要到运行时才知道')
+      addOutside(raw)
+      return
+    }
+    // After a change to a directory not known before it runs (a cd, env -C, sudo -D, sudo -i), a relative target is not known either.
+    if (!path.isAbsolute(resolvedWord) && hereUnknown && !(allowSinks && HARMLESS_SINKS.has(resolvedWord))) {
+      flag('acts on a relative path after changing to a directory not known before it runs', '先切换到一个运行时才知道的目录，再操作相对路径')
       addOutside(raw)
       return
     }
@@ -1130,22 +1166,53 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
     if (head === 'popd') continue
     // A program that runs another command (or one not known) with a command word in its arguments: that
     // command is not followed here, so it asks.
+    let readInto = false
     if (head && !INTERPRETER_RE.test(head)) {
       const hereString = parsed.hereString ? args[args.indexOf('<<<') + 1] : undefined
       const runnerText = [...plain, ...(hereString ? [hereString] : []), ...(parsed.heredoc ? [parsed.heredoc.body] : [])]
       // `head` is the command past the wrappers commandHead reads (env, nice, timeout, …): those are checked as what they run.
+      const inner = READ_INTO_RUNNERS.has(head) && depth < 2 ? unwrapRunner(head, plain) : undefined
       if (head === 'busybox' && plain[0] === 'httpd') {
         // A web server, checked as one (listeningServers).
+      } else if (inner) {
+        // su -c, flock, systemd-run: the command they run, read as one, in the directory it runs in
+        // (a login, a service without --same-dir: not known; servers are left to listeningServers).
+        const dirs = inner.keepsDir ? (hereUnknown ? undefined : heres) : inner.dir !== undefined ? [inner.dir] : undefined
+        const into = dirs === undefined ? "cd '?' && " : dirs.filter((d) => d !== cwd).map((d) => `cd ${shellQuote(d)}; `).join('')
+        const text = inner.code ?? (inner.words ?? []).map(shellQuote).join(' ')
+        const found = analyzeDeletes(`${into}${text}`, cwd, depth + 1)
+        readInto = true
+        for (const target of found.outside) {
+          operation = found.removes && !found.writes ? 'remove' : 'write'
+          addOutside(target)
+        }
+        if (found.removes) removes = true
+        if (found.unverifiable) flag(found.unverifiable, found.unverifiableZh ?? found.unverifiable)
+      } else if (head === 'xargs') {
+        // xargs runs the command after its own options on the names it reads.
+        const command = xargsCommand(plain)
+        if (command !== undefined && XARGS_RISKY.test(path.basename(command))) flag(`passes names to ${path.basename(command)} through xargs`, `会通过 xargs 把文件名交给 ${path.basename(command)}`)
       } else if (RUNNERS.has(head)) {
-        if (runnerText.some((a) => RUN_WORD.test(a))) flag(`runs a command through ${head} that may delete, write or serve files`, `会通过 ${head} 运行一条可能删除、改写或对外提供文件的命令`)
-      } else if (!KNOWN_COMMANDS.has(head) && !DELETE_COMMANDS.has(head) && !SHELL_NAME.test(head)) {
-        const operands = plain.filter((a) => !a.startsWith('-'))
-        if ((operands[0] !== undefined && RUN_WORD_AT_START.test(operands[0])) || runnerText.some((a) => /\s/.test(a) && RUN_WORD_AT_START.test(a.trim()))) {
-          flag(`passes a command that may delete, write or serve files to ${head}, which this does not know`, `把一条可能删除、改写或对外提供文件的命令交给了不认识的程序 ${head}`)
+        // chroot's paths are the new root's; the others run what they are given: a word that deletes,
+        // writes or serves asks. chroot's servers are read by listeningServers (in a directory not known).
+        const servers = head !== 'chroot'
+        if (runnerText.some((a) => RUN_WORD.test(a) || DESTRUCTIVE_TOKEN.test(a) || (servers && RUN_SERVER_WORD.test(a)))) {
+          flag(`runs a command through ${head} that may delete, write or serve files`, `会通过 ${head} 运行一条可能删除、改写或对外提供文件的命令`)
+        }
+      } else if (!KNOWN_COMMANDS.has(head) && !DELETE_COMMANDS.has(head)) {
+        if (passesACommand(plain, runnerText)) {
+          flag(`passes a command that may delete, write or serve files to ${head}, a program the classifier cannot follow`, `把一条可能删除、改写或对外提供文件的命令交给了无法确认的程序 ${head}`)
         }
       }
+    } else if (head && !(args.some((a) => new RegExp(`^(?:${INLINE_FLAG}|-r|--eval|--command)$`).test(a)) || parsed.heredoc)) {
+      // An interpreter or a shell running a script: the script's own arguments as for a program the classifier cannot follow.
+      const scriptAt = plain.findIndex((a) => !a.startsWith('-'))
+      const scriptArgs = scriptAt < 0 ? [] : plain.slice(scriptAt + 1)
+      if (passesACommand(scriptArgs, scriptArgs)) {
+        flag(`passes a command that may delete, write or serve files to the script ${plain[scriptAt]}, which the classifier cannot follow`, `把一条可能删除、改写或对外提供文件的命令交给了脚本 ${plain[scriptAt]}，无法确认它会做什么`)
+      }
     }
-    if ((COMPLEX_WRAPPERS.has(head) || COMPLEX_WRAPPERS.has(wrapper)) && DESTRUCTIVE_TOKEN.test(segmentText)) flag(`runs a destructive command through ${COMPLEX_WRAPPERS.has(wrapper) ? wrapper : head}`, `会通过 ${COMPLEX_WRAPPERS.has(wrapper) ? wrapper : head} 运行会删除或改写文件的命令`)
+    if (!readInto && (COMPLEX_WRAPPERS.has(head) || COMPLEX_WRAPPERS.has(wrapper)) && DESTRUCTIVE_TOKEN.test(segmentText)) flag(`runs a destructive command through ${COMPLEX_WRAPPERS.has(wrapper) ? wrapper : head}`, `会通过 ${COMPLEX_WRAPPERS.has(wrapper) ? wrapper : head} 运行会删除或改写文件的命令`)
     if (INTERPRETER_RE.test(head) && args.some((a) => new RegExp(`^(?:${INLINE_FLAG}|-r|--eval|--command)$`).test(a))) checkInlineCode(args.join(' '))
     // A program read from a here-document is inline code too.
     else if (INTERPRETER_RE.test(head) && parsed.heredoc) checkInlineCode(parsed.heredoc.body)
@@ -1365,6 +1432,32 @@ function otherDownloadTargets(head: string, args: string[]): { files: string[]; 
     else directories.push(undefined)
   }
   return { files, directories, ...(unknown ? { unknown } : {}) }
+}
+
+/** A shell word, quoted so it reads back as itself. */
+function shellQuote(word: string): string {
+  return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`
+}
+
+/** The command xargs runs: the first word after its own options (and their values). */
+function xargsCommand(args: string[]): string | undefined {
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k]!
+    if (a === '--') return args[k + 1]
+    if (/^-[aEeIiLlnPsd]$|^--(?:arg-file|delimiter|eof|replace|max-lines|max-args|max-procs|max-chars|process-slot-var)$/.test(a)) {
+      k++
+      continue
+    }
+    if (a.startsWith('-')) continue
+    return a
+  }
+  return undefined
+}
+
+/** A program's arguments carry a command that deletes, writes or serves: as the first operand, or as a string holding a whole command. */
+function passesACommand(args: string[], texts: string[]): boolean {
+  const operands = args.filter((a) => !a.startsWith('-'))
+  return (operands[0] !== undefined && RUN_WORD_AT_START.test(operands[0])) || texts.some((a) => /\s/.test(a) && RUN_WORD_AT_START.test(a.trim()))
 }
 
 /** curl's short options that take a value (the rest of the cluster, or the next word). */
@@ -1806,8 +1899,17 @@ function unwrapRunner(name: string, args: string[]): { code?: string; words?: st
     return undefined
   }
   if (name === 'chroot') {
-    const k = args.findIndex((a) => !a.startsWith('-'))
-    return k < 0 ? undefined : { words: args.slice(k + 1), keepsDir: false }
+    for (let k = 0; k < args.length; k++) {
+      const a = args[k]!
+      // --userspec USER:GROUP and --groups LIST take a value (also with =).
+      if (a === '--userspec' || a === '--groups') {
+        k++
+        continue
+      }
+      if (a.startsWith('-')) continue
+      return { words: args.slice(k + 1), keepsDir: false }
+    }
+    return undefined
   }
   if (name === 'systemd-run') {
     let keepsDir = false

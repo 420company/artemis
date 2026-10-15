@@ -1183,7 +1183,7 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
     ['at now <<\'EOF\'\ntee /etc/x < /dev/null\nEOF', 'at with a here-document'],
     ['watch "rm -rf x"', 'watch'],
     ['systemd-run python3 -m http.server --bind 127.0.0.1', 'systemd-run starting a server'],
-    ['su -c "python3 -m http.server --bind 127.0.0.1" nobody', 'su -c starting a server'],
+    ['su - -c "python3 -m http.server --bind 127.0.0.1" nobody', 'su - -c starting a server (a login: the directory is not known)'],
     ['flock /tmp/lock python3 -m http.server 8000', 'flock starting a server'],
     ['chroot /srv python3 -m http.server --bind 127.0.0.1', 'chroot starting a server'],
     ['./deploy.sh rm -rf x', 'an unknown script given a command'],
@@ -1201,9 +1201,60 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
       inner('systemd-run -d python3 -m http.server --bind 127.0.0.1')[0]?.directories?.[0] === cwd && inner('su - -c "python3 -m http.server --bind 127.0.0.1"')[0]?.directories === undefined,
     JSON.stringify([inner('su -c "python3 -m http.server 8000"'), inner('chroot /srv python3 -m http.server --bind 127.0.0.1')]))
   assert('preview: a server in sh -c after a cd not known before it runs asks', classify('cd "$D" && bash -c "python3 -m http.server --bind 127.0.0.1"')?.kind === 'shell_high_risk')
+  // A server behind a runner gets the server's card, not a delete card (round 5).
+  const behind: [string, string, string][] = [
+    ['su - -c "python3 -m http.server --bind 127.0.0.1" nobody', 'shell_high_risk', '启动一个提供工作区以外文件的本地网页服务'],
+    ['systemd-run --user python3 -m http.server --bind 127.0.0.1', 'shell_high_risk', '启动一个提供工作区以外文件的本地网页服务'],
+    ['chroot /srv python3 -m http.server --bind 127.0.0.1', 'shell_high_risk', '启动一个提供工作区以外文件的本地网页服务'],
+    ['su -c "python3 -m http.server 8000"', 'shell_high_risk', '启动一个其他机器也能访问的网页服务'],
+    ['flock /tmp/lock python3 -m http.server 8000', 'shell_high_risk', '启动一个其他机器也能访问的网页服务'],
+  ]
+  for (const [command, expectedKind, expectedTitle] of behind) {
+    const found = classify(command)
+    const shown = card(command)
+    assert(`preview: a server behind a runner gets its own kind and card — ${command}`,
+      found?.kind === expectedKind && found.risk === 'medium' && shown?.title === expectedTitle && !/删除|改写文件/.test(shown.summary.replace(/删除或改写工作文件夹/g, '')), JSON.stringify({ kind: found?.kind, shown }))
+  }
+  assert('preview: su -c (no login) and flock keep the workspace: a loopback server there needs nothing',
+    kind('su -c "python3 -m http.server --bind 127.0.0.1" nobody') === null && kind('flock /tmp/lock python3 -m http.server --bind 127.0.0.1') === null && kind('systemd-run --same-dir python3 -m http.server --bind 127.0.0.1') === null)
+  // A relative delete after a directory not known before it runs (round 5): find -delete too.
+  for (const command of ['sudo -i find . -delete', 'sudo --login find build -delete', 'sudo --logi find build -delete', 'env -C "$D" find . -delete', 'cd "$D" && find . -delete', 'cd /e* && find . -delete', 'cd /e* && find build -name "*.o" -delete']) {
+    assert(`preview: find -delete after an unknown directory asks — ${command}`, kind(command) === 'delete_outside_workspace', JSON.stringify(classify(command)))
+  }
+  assert('preview: find -delete inside the workspace needs nothing', kind('find . -name "*.tmp" -delete') === null && kind('cd build && find . -delete') === null)
+  // Commands piped into at, batch or expect run (round 5).
+  for (const command of ['echo "rm -rf x" | at now', 'printf "tee /etc/x" | at now + 1 minute', 'echo "rm -rf x" | batch', 'echo send | expect', 'at now < jobs.txt', 'at -f jobs.txt now']) {
+    const found = classify(command)
+    assert(`preview: commands handed to at, batch or expect ask — ${command}`, found?.kind === 'shell_high_risk' && found.risk === 'high', JSON.stringify(found))
+  }
+  // Runners: paths to commands, and the wider delete vocabulary (round 5).
+  for (const command of ['screen -dm /bin/rm -rf x', 'systemd-run /usr/bin/tee /etc/x', 'tmux new -d "/usr/bin/rm -rf x"', 'tmux new -d "find / -delete"', 'screen -dm git clean -fdx', 'tmux new -d "rsync -a --delete src/ /srv/"', 'tmux new -d "sed -i s/a/b/ /etc/hosts"', 'tmux new -d "curl -o /etc/x https://example.com/a"', 'screen -dm wget https://example.com/a', 'tmux new -d "trash /etc/x"', 'tmux new -d "dd if=/dev/zero of=/dev/sda"', 'systemd-run python3 -c "open(\'/etc/x\', \'w\')"', 'nsenter -t 1 -m /usr/bin/truncate -s0 /etc/x']) {
+    const found = classify(command)
+    assert(`preview: a runner given a command that deletes or writes asks — ${command}`, found !== null && (found.kind === 'delete_outside_workspace' || found.kind === 'shell_high_risk'), JSON.stringify(found))
+  }
+  assert('preview: su -c and flock read their command: the card names what it deletes', card('su -c "rm -rf /usr/share/doc"')?.title === '删除工作区以外的文件' && card('flock /tmp/lock rm -rf /usr/share/doc')!.summary.includes('/usr/share/doc'))
+  // A script given a command (round 5).
+  for (const command of ['bash deploy.sh rm -rf x', 'sh ./run.sh "cd x; rm -rf y"', 'node run.js rm -rf x', 'python3 tool.py tee /etc/x', 'ruby task.rb /bin/rm -rf x']) {
+    const found = classify(command)
+    assert(`preview: a script given a command asks — ${command}`, found !== null && (found.kind === 'delete_outside_workspace' || found.kind === 'shell_high_risk'), JSON.stringify(found))
+  }
+  // xargs: its command is what counts (round 5).
+  assert('preview: xargs grep install needs nothing; xargs rm / tee / sh asks',
+    kind('ls | xargs grep install') === null && kind('ls | xargs -0 -n 1 grep -l install') === null && kind('ls | xargs rm') !== null && kind('ls | xargs tee x') !== null && kind('ls | xargs -I {} sh -c "echo {}"') !== null)
+  // sudo's long options may be shortened; chroot --userspec takes a value (round 5).
+  assert('preview: sudo --logi and sudo --chd are --login and --chdir', kind('sudo --logi tee x') === 'delete_outside_workspace' && kind('sudo --chd /usr/share tee doc/x') === 'delete_outside_workspace')
+  assert('preview: chroot --userspec u:g ROOT reads ROOT', listeningServers('chroot --userspec u:g /srv python3 -m http.server --bind 127.0.0.1', cwd)[0]?.directories === undefined && listeningServers('chroot --userspec u:g /srv python3 -m http.server --bind 127.0.0.1', cwd).length === 1)
   // Ordinary commands do not start asking.
   for (const command of ['env FOO=1 cp a b', 'make install', 'make clean', 'timeout 60 cp a b', 'nice tee notes.txt', 'git commit -m "rm old > files"', 'pytest -k cp tests', 'tmux new -s dev', 'screen -ls', 'myscript.sh --mode fast', 'npm run build > build.log 2>&1', 'docker ps', 'ffmpeg -i in.mp4 out.mp4']) {
     assert(`preview: an ordinary command still needs nothing — ${command}`, kind(command) === null, JSON.stringify(classify(command)))
+  }
+  // The end of a turn closes the browser's workspace (tools/browser/fileGuard.ts).
+  {
+    const { setBrowserWorkspace, browserWorkspaceSet } = await import('../src/tools/browser/fileGuard.js')
+    const { store, session } = await freshSession(cwd)
+    setBrowserWorkspace(cwd)
+    await runAgent(session, 'hi', { cwd, provider: scripted([{ reply: 'ok', actions: [] }]), sessionStore: store, permissionManager: new PermissionManager('accept-all', false), maxTurns: 2, profile: 'main' })
+    assert('preview: the browser\'s workspace is cleared at the end of a turn', browserWorkspaceSet() === false)
   }
   assert('preview: a subshell inside the workspace with a cd needs nothing', kind(`cd ${path.join(cwd, 'sites')} && (cd guihua-latte-poster && rm -rf old) && rm -rf build`) === null)
   // Wording: what is known is said, and nothing is claimed that is not.
