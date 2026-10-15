@@ -294,8 +294,9 @@ export async function rebuildIndex(cwd: string, scope: MemoryScope): Promise<voi
  * entries whose lines fit in `maxChars`, listed by name. Recency only
  * decides which entries fit; the order never follows it, so updating a
  * memory without changing its name or description leaves the text, and the
- * prompt prefix a provider caches, exactly as it was. Empty string when no
- * entries.
+ * prompt prefix a provider caches, exactly as it was. Adding an entry, or
+ * one falling out because newer ones fill the budget, still changes it.
+ * Empty string when no entries.
  */
 export async function loadPromptIndexText(cwd: string, scope: MemoryScope, maxChars: number): Promise<string> {
   const entries = (await listMemories(cwd, scope)).filter((e) => !INDEX_EXCLUDED.has(e.name))

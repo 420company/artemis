@@ -75,6 +75,8 @@ export function resolveProjectedMcpToolName(
 
 const MAX_PROJECTED_MCP_DESCRIPTION_LENGTH = 2_048;
 const DEFAULT_MAX_PROJECTED_MCP_TOOLS = 96;
+/** How many projected MCP tools a request carries by default. */
+export const MAX_PROJECTED_MCP_TOOLS = DEFAULT_MAX_PROJECTED_MCP_TOOLS;
 // Keyed by host so a forced host environment (tests) never reuses a manifest
 // built for a different platform.
 let cachedBuiltInTools: { hostKey: string; tools: ProviderNativeFunctionTool[] } | undefined;

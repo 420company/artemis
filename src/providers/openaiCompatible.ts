@@ -96,7 +96,10 @@ function onPlatformGateway(config: ProviderConfig): boolean {
  * The reasoning_effort to send: to the platform gateway the profile's level
  * as it is (the model name there is an alias; the gateway gives each
  * upstream the level in its own form, clamped to what the model takes),
- * elsewhere only to the OpenAI reasoning models that take it.
+ * elsewhere only to the OpenAI reasoning models that take it. As with the
+ * Messages provider, no level on the profile sends none: the model's own
+ * default applies (the tier's level, when it has one, comes onto the
+ * profile from the agent server, and the gateway applies it too).
  */
 function requestReasoningEffort(config: ProviderConfig): string | undefined {
   if (onPlatformGateway(config)) return config.effort
@@ -531,6 +534,20 @@ function injectImagesIntoMessages(
   }
 }
 
+/**
+ * The request's images as a user message of their own, after the marked
+ * history (with cache marks): the stored messages stay byte for byte what
+ * the cache holds, and the run sends the same images with every request.
+ */
+function trailingImagesMessage(
+  attachments: import('./types.ts').ImageAttachment[],
+  supportsImages: boolean,
+): Record<string, unknown> {
+  const holder: Array<{ role: string; content: OpenAIMessageContent }> = [{ role: 'user', content: '' }]
+  injectImagesIntoMessages(holder, attachments, supportsImages)
+  return holder[0]!
+}
+
 const IMAGE_OMITTED_PLACEHOLDER = '[image omitted due to request size]';
 
 const INLINE_IMAGE_MARKDOWN = /!\[image\]\(data:[^)]*\)/g;
@@ -611,6 +628,7 @@ export function visionSkipHeader(bridgesImages: boolean, options?: ProviderReque
 export class OpenAICompatibleProvider implements ChatProvider {
   readonly supportsImages: boolean;
   readonly bridgesImages: boolean;
+  readonly promptCacheMarks: boolean;
   readonly supportsNativeToolCalls = true;
   readonly contextLength?: number;
   private readonly config: ProviderConfig;
@@ -624,6 +642,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
     this.supportsImages = modelSupportsImages(config);
     this.model = config.model;
     this.bridgesImages = config.gatewayBridgesImages === true;
+    this.promptCacheMarks = config.promptCacheMarks === true;
     this.contextLength = platformContextLength(config);
     // Only a platform profile states its output limit; otherwise the budget
     // reserves a default (requests send no max_tokens unless asked).
@@ -641,10 +660,13 @@ export class OpenAICompatibleProvider implements ChatProvider {
     const reasoningMode = getReasoningContentMode(this.config.model)
     const [conversation, runtimeContext] = splitTrailingRuntimeContext(messages)
     const mapped = conversation.map((m) => mapMessage(m, { reasoningMode })) as Array<{ role: string; content: OpenAIMessageContent }>
-    if (options?.imageAttachments?.length) {
+    if (options?.imageAttachments?.length && !this.promptCacheMarks) {
       injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages || this.bridgesImages)
     }
-    if (this.config.promptCacheMarks === true) markPromptCacheBreakpoints(mapped as any, mapped.length)
+    if (this.promptCacheMarks) {
+      markPromptCacheBreakpoints(mapped as any, mapped.length)
+      if (options?.imageAttachments?.length) mapped.push(trailingImagesMessage(options.imageAttachments, this.supportsImages || this.bridgesImages) as any)
+    }
     mapped.push(...(runtimeContext.map((m) => mapMessage(m, { reasoningMode })) as typeof mapped))
 
     const body: Record<string, unknown> = {
@@ -740,6 +762,9 @@ export class OpenAICompatibleProvider implements ChatProvider {
     let totalTokens = 0
     let cacheReadTokens: number | undefined
     let cacheCreationTokens: number | undefined
+    // A stream that stops with neither a finish reason nor [DONE] was cut off.
+    let sawFinish = false
+    let sawDone = false
     let firstResponseMs: number | undefined
     let responseModel = this.config.model
     const guardStreamingText = options?.guardStreamingText === true
@@ -788,6 +813,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
 
         for (const line of lines) {
           const trimmed = line.trim()
+          if (trimmed === 'data: [DONE]') sawDone = true
           if (!trimmed || trimmed === 'data: [DONE]') continue
           if (!trimmed.startsWith('data: ')) continue
 
@@ -799,6 +825,14 @@ export class OpenAICompatibleProvider implements ChatProvider {
           }
 
           const p = parsed as Record<string, unknown>
+
+          // An error in the stream (the platform gateway relays an upstream's
+          // mid-stream failure this way) ends the answer early: what came so
+          // far is not a whole answer.
+          if (p['error'] !== undefined && p['error'] !== null && !Array.isArray(p['choices'])) {
+            const err = p['error'] as { message?: unknown } | string
+            throw new StreamInterruptedError(new Error(typeof err === 'string' ? err : String(err?.message ?? 'stream error')))
+          }
 
           const choices = p['choices'] as Array<Record<string, unknown>> | undefined
           const deltaObj = choices?.[0]?.['delta'] as Record<string, unknown> | undefined
@@ -877,6 +911,7 @@ export class OpenAICompatibleProvider implements ChatProvider {
           // Meaningful increments reset the idle deadline; keep-alive comments
           // and blank lines never reach this point.
           const finishReason = choices?.[0]?.['finish_reason']
+          if (finishReason) sawFinish = true
           if (
             (typeof contentDelta === 'string' && contentDelta) ||
             (typeof reasoningDelta === 'string' && reasoningDelta) ||
@@ -889,6 +924,12 @@ export class OpenAICompatibleProvider implements ChatProvider {
       }
     } finally {
       idleGuard.dispose()
+    }
+    // The platform gateway always ends a whole answer with a finish reason and
+    // [DONE]; without either the connection was cut and the answer is partial.
+    // (Other endpoints keep the lenient reading: some end streams loosely.)
+    if (onPlatformGateway(this.config) && !sawFinish && !sawDone && buffer.trim() !== 'data: [DONE]') {
+      throw new StreamInterruptedError(new Error('the stream ended without a finish reason'))
     }
 
     // Filter out completely empty tool slots that the model sometimes emits as separators
@@ -977,10 +1018,13 @@ export class OpenAICompatibleProvider implements ChatProvider {
     const reasoningMode = getReasoningContentMode(this.config.model);
     const [conversation, runtimeContext] = splitTrailingRuntimeContext(messages);
     const mapped = conversation.map((m) => mapMessage(m, { reasoningMode }));
-    if (options?.imageAttachments?.length) {
+    if (options?.imageAttachments?.length && !this.promptCacheMarks) {
       injectImagesIntoMessages(mapped as any, options.imageAttachments, this.supportsImages || this.bridgesImages)
     }
-    if (this.config.promptCacheMarks === true) markPromptCacheBreakpoints(mapped, mapped.length);
+    if (this.promptCacheMarks) {
+      markPromptCacheBreakpoints(mapped, mapped.length);
+      if (options?.imageAttachments?.length) mapped.push(trailingImagesMessage(options.imageAttachments, this.supportsImages || this.bridgesImages));
+    }
     mapped.push(...runtimeContext.map((m) => mapMessage(m, { reasoningMode })));
 
     const body: Record<string, unknown> = {

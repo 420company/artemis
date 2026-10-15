@@ -580,6 +580,13 @@ export type ProviderResponse = {
 
 export interface ChatProvider {
   readonly supportsNativeToolCalls?: boolean;
+  /**
+   * True when requests carry prompt cache marks (a profile with
+   * promptCacheMarks; routed providers: any candidate). The run then keeps
+   * its tool list and images the same from one request to the next, so the
+   * cached prefix holds.
+   */
+  readonly promptCacheMarks?: boolean;
   /** Model id this provider sends requests to, when known. */
   readonly model?: string;
   /** Context window (tokens) of the model behind this provider, when known. */

@@ -183,6 +183,7 @@ import {
 import {
   buildProviderNativeFunctionTools,
   buildProviderNativeToolRuntime,
+  MAX_PROJECTED_MCP_TOOLS,
   mapProviderNativeToolCallToAction,
   resolveProjectedMcpToolName,
 } from './providerNativeTools.js';
@@ -3404,16 +3405,23 @@ function extractLatestUserRequest(
   return undefined;
 }
 
+/**
+ * The MCP tools a session keeps loaded. With prompt cache marks it keeps
+ * as many as a request carries (MAX_PROJECTED_MCP_TOOLS): the selection then
+ * only grows within the session, and once full stays as it is, so the tool
+ * list at the start of every prompt stops changing.
+ */
 function mergeStickyNativeMcpTools(
   current: string[] | undefined,
   next: string[] | undefined,
+  limit = 64,
 ): string[] {
   const merged = [
     ...(current ?? []).map((entry) => entry.trim()).filter(Boolean),
     ...(next ?? []).map((entry) => entry.trim()).filter(Boolean),
   ].filter((entry) => /^mcp(__|_prompt__|_resource__)/.test(entry));
 
-  return [...new Set(merged)].slice(-64);
+  return [...new Set(merged)].slice(-limit);
 }
 
 function buildToolError(
@@ -7462,14 +7470,26 @@ async function runAgentInner(
    * queued since the last request, trimmed to one request's count and byte
    * budget. Nothing goes to a model that cannot see images.
    */
+  const runViewedImages: import('../providers/types.ts').ImageAttachment[] = [];
+  const runVisionSkip: string[] = [];
   function takeRequestImages(
     userImages: readonly import('../providers/types.ts').ImageAttachment[],
     provider: ChatProvider,
     userVisionSkip: readonly string[] = [],
   ): { images: import('../providers/types.ts').ImageAttachment[]; visionSkip?: string[] } {
-    const { kept, dropped } = fitImagesToRequest([...userImages, ...viewedImages.take()]);
+    // With prompt cache marks the run keeps every image it sent (the user's
+    // and those view_image queued) in each later request, so the requests
+    // stay alike; otherwise each image goes once.
+    const keep = provider.promptCacheMarks === true;
+    const viewed = viewedImages.take();
+    const skipped = viewedImages.takeVisionSkip();
+    if (keep) {
+      runViewedImages.push(...viewed);
+      runVisionSkip.push(...skipped);
+    }
+    const { kept, dropped } = fitImagesToRequest([...userImages, ...(keep ? runViewedImages : viewed)]);
     // Gateway vision models the helper already failed on for these images.
-    const visionSkip = [...new Set([...userVisionSkip, ...viewedImages.takeVisionSkip()])];
+    const visionSkip = [...new Set([...userVisionSkip, ...(keep ? runVisionSkip : skipped)])];
     if (dropped.length > 0) {
       options.onInfo?.(`[images] ${dropped.length} image(s) over the per-request limit were not sent`);
     }
@@ -7833,6 +7853,7 @@ async function runAgentInner(
       session.stickyNativeMcpTools = mergeStickyNativeMcpTools(
         session.stickyNativeMcpTools,
         nativeToolRuntime.selectedProjectedToolNames,
+        activeProvider.promptCacheMarks === true ? MAX_PROJECTED_MCP_TOOLS : undefined,
       );
       options.onInfo?.(
         [
@@ -7859,11 +7880,13 @@ async function runAgentInner(
     });
     let providerMessages = prepared.messages;
     // The user's images go with the first request; images the agent chose
-    // to look at (view_image) go with the request right after.
+    // to look at (view_image) go with the request right after. With prompt
+    // cache marks, every image stays in each later request of the run.
+    const keepImages = activeProvider.promptCacheMarks === true;
     const { images: requestImages, visionSkip } = takeRequestImages(
-      turn === 1 ? userImages.images : [],
+      turn === 1 || keepImages ? userImages.images : [],
       activeProvider,
-      turn === 1 ? userImages.visionSkip : [],
+      turn === 1 || keepImages ? userImages.visionSkip : [],
     );
     const providerCallOptions = {
       nativeFunctionTools,

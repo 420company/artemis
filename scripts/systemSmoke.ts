@@ -1610,6 +1610,61 @@ test('prompt cache marks: a gateway profile marks the system prompt and the newe
   }
 });
 
+test('prompt cache marks: images go in a message of their own after the marked history', async () => {
+  const { OpenAICompatibleProvider } = await import('../src/providers/openaiCompatible.js');
+  const endpoint = await recordingEndpoint({ prompt_tokens: 10, completion_tokens: 1 });
+  try {
+    const at = new Date(0).toISOString();
+    const messages = [
+      { id: 'system', role: 'system' as const, content: 'S', createdAt: at },
+      { id: 'u1', role: 'user' as const, content: 'what is in the picture?', createdAt: at },
+      { id: 'rc', role: 'user' as const, name: 'runtime_context', content: 'ctx', createdAt: at },
+    ];
+    const images = [{ mediaType: 'image/png', data: 'AAAA' }] as any;
+    const provider = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: endpoint.url, apiKey: 'k', model: 'alias', gatewayBridgesImages: true, promptCacheMarks: true });
+    assert.equal(provider.promptCacheMarks, true);
+    await provider.completeStream(messages, () => undefined, { imageAttachments: images });
+    const body = endpoint.bodies[0];
+    assert.deepEqual(body.messages.map((m: any) => m.role), ['system', 'user', 'user', 'user']);
+    assert.deepEqual(body.messages[1].content, [{ type: 'text', text: 'what is in the picture?', cache_control: { type: 'ephemeral' } }], 'the stored message is unchanged');
+    assert.deepEqual(body.messages[2].content, [{ type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }]);
+    assert.equal(body.messages[3].content, 'ctx');
+  } finally {
+    await endpoint.close();
+  }
+});
+
+test('gateway streams: an error chunk or a cut-off stream is an interrupted answer, not a short one', async () => {
+  const http = await import('node:http');
+  const { OpenAICompatibleProvider } = await import('../src/providers/openaiCompatible.js');
+  let mode: 'error' | 'cut' | 'whole' = 'error';
+  const server = http.createServer(async (req, res) => {
+    for await (const _ of req) void _;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: 'Hel' } }] })}\n\n`);
+    if (mode === 'error') return res.end(`data: ${JSON.stringify({ error: { message: 'upstream overloaded', type: 'overloaded_error' } })}\n\n`);
+    if (mode === 'cut') return res.end();
+    res.end(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
+  });
+  await new Promise<void>((done) => server.listen(0, '127.0.0.1', () => done()));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`;
+  try {
+    const at = new Date(0).toISOString();
+    const messages = [{ id: 'u', role: 'user' as const, content: 'hi', createdAt: at }];
+    const gateway = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: url, apiKey: 'k', model: 'alias', gatewayBridgesImages: true });
+    await assert.rejects(gateway.completeStream(messages, () => undefined), (err: Error) => err.name === 'StreamInterruptedError' && /upstream overloaded/.test(err.message));
+    mode = 'cut';
+    await assert.rejects(gateway.completeStream(messages, () => undefined), (err: Error) => err.name === 'StreamInterruptedError');
+    // Another endpoint that ends loosely is still read as it was.
+    const other = new OpenAICompatibleProvider({ protocol: 'openai', baseUrl: url, apiKey: 'k', model: 'some-model' });
+    assert.equal((await other.completeStream(messages, () => undefined)).text, 'Hel');
+    mode = 'whole';
+    assert.equal((await gateway.completeStream(messages, () => undefined)).text, 'Hel');
+  } finally {
+    await new Promise<void>((done) => server.close(() => done()));
+  }
+});
+
 test('Messages provider: effort and adaptive thinking for the 5.x model ids', async () => {
   const { MessagesCompatibleProvider } = await import('../src/providers/messagesCompatible.js');
   assert.ok(MessagesCompatibleProvider);
