@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import Anthropic from '@anthropic-ai/sdk';
 import { RUNTIME_CONTEXT_MESSAGE_NAME } from './providers/runtimeContext.js';
+import { dropStoredThinking } from './providers/thinkingReplay.js';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -2897,6 +2898,9 @@ async function thinkTurn(
                     onRetryLog: onToolLog ? (m: string): void => onToolLog(m, 'warn') : undefined,
                 },
             );
+            // Thinking the request left out stays out of the history from now on.
+            const dropped = dropStoredThinking(history, completion.droppedThinkingMessageIds);
+            if (dropped.changed) writeBack(dropped.messages);
             return { interrupted: false, completion };
         } catch (error) {
             if (interrupted && isAbortLikeError(error)) {
@@ -3131,6 +3135,7 @@ async function thinkTurn(
                 const assistantReplyMessage = makeSessionMessage('assistant', forcedReply, {
                     reasoningContent: finalResult.reasoningContent,
                     rawContentBlocks: finalResult.rawContentBlocks,
+                    thinkingBinding: finalResult.thinkingBinding,
                 });
                 appendHistory(finalizerMessage, assistantReplyMessage);
                 break;
@@ -3156,6 +3161,7 @@ async function thinkTurn(
                     // Preserve Anthropic raw content blocks (thinking + signatures)
                     // for extended-thinking + tool_use round-trip.
                     rawContentBlocks: completion.rawContentBlocks,
+                    thinkingBinding: completion.thinkingBinding,
                 },
             );
             const roundMessages: SessionMessage[] = [assistantMessage];
@@ -3377,6 +3383,7 @@ async function thinkTurn(
                 appendHistory(makeSessionMessage('assistant', reply, {
                     reasoningContent: completion.reasoningContent,
                     rawContentBlocks: completion.rawContentBlocks,
+                    thinkingBinding: completion.thinkingBinding,
                 }));
                 selfCheckPending = decision;
                 selfCheckExtraRounds += 1;
@@ -3401,6 +3408,7 @@ async function thinkTurn(
         appendHistory(makeSessionMessage('assistant', storedReply, {
             reasoningContent: finalResult?.reasoningContent,
             rawContentBlocks: textOnly ? undefined : finalResult?.rawContentBlocks,
+            thinkingBinding: textOnly ? undefined : finalResult?.thinkingBinding,
         }));
         skillSlot.reply = reply;
         skillSlot.completed = !replyIsRuntimeFallback;

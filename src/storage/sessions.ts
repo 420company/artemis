@@ -404,6 +404,7 @@ function projectChatMessage(message: SessionMessage): ChatHistoryMessage {
   const {
     toolCalls: _toolCalls,
     rawContentBlocks: _raw,
+    thinkingBinding: _binding,
     contentBlocks: _blocks,
     reasoningContent: _reasoning,
     ...rest

@@ -549,6 +549,18 @@ export type ProviderResponse = {
    */
   rawContentBlocks?: any[];
   /**
+   * Digest of the prefix the reply's thinking was produced against; stored
+   * on the assistant message as `thinkingBinding` (Messages provider, models
+   * that check replayed thinking).
+   */
+  thinkingBinding?: string;
+  /**
+   * Stored assistant turns whose thinking blocks this request left out (the
+   * history before them changed, or the API rejected them). The caller
+   * removes those blocks from its history: once left out, they stay out.
+   */
+  droppedThinkingMessageIds?: string[];
+  /**
    * True when `text` was emitted incrementally via the stream callback during
    * the call (real SSE). False or undefined means the caller is responsible
    * for emitting `text` if it wants users to see it. This distinction matters
