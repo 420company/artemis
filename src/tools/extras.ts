@@ -124,8 +124,13 @@ function guardWritePath(cwd: string, inputPath: string, permissionMode?: 'ask' |
 
 // ── Git without the repository's code ─────────────────────────────────────────
 // A repository's config can make git run programs: hooks, core.fsmonitor,
-// diff.external and textconv drivers, filter drivers. The git extras run with
-// all of those switched off, so they never run code from the workspace.
+// diff.external and textconv drivers, filter drivers, a pager, a signing
+// program. The git extras run with all of those switched off or refused, so
+// they never run code from the workspace. Keys that only matter elsewhere:
+// core.editor / sequence.editor (commit always has -m), merge drivers (no
+// merge is run), diff.<driver>.command (--no-ext-diff), core.sshCommand,
+// core.askPass, credential.helper, protocol.* and upload/receive-pack (no
+// extra talks to a remote).
 
 let emptyHooksDir: string | undefined
 function noHooksDir(): string {
@@ -136,6 +141,7 @@ function noHooksDir(): string {
 /** `-c` options that keep git from running anything the repository configures. */
 export function gitSafetyOptions(filterDrivers: readonly string[] = []): string[] {
   const options = [
+    '--no-pager',
     '-c', 'core.fsmonitor=false',
     '-c', `core.hooksPath=${noHooksDir()}`,
     '-c', 'diff.external=',
@@ -148,23 +154,31 @@ export function gitSafetyOptions(filterDrivers: readonly string[] = []): string[
   return options
 }
 
+/** Signing programs: git_commit would run them when the commit is signed. */
+const GIT_SIGNING_PROGRAM_KEY = /^gpg\.(?:program|(?:openpgp|x509|ssh)\.program|ssh\.defaultkeycommand)$/i
+
 /**
- * Names of the filter drivers (filter.<name>.clean|smudge|process) the
- * repository's own config declares (local and worktree scope, includes
- * followed): files in the workspace that anything with write access to it
- * can plant. Drivers the owner installed in their global or system config
- * (git-lfs) are the owner's own programs and stay as they are.
+ * Program-running settings the repository's own config declares (local and
+ * worktree scope, includes followed): files in the workspace that anything
+ * with write access to it can plant. The filter drivers by name, and the
+ * signing-program keys. What the owner set in their global or system config
+ * (git-lfs, their own signing setup) is the owner's own and stays as it is.
  */
-async function gitRepoFilterDrivers(cwd: string): Promise<string[]> {
+async function gitRepoProgramConfig(cwd: string): Promise<{ filterDrivers: string[]; signingKeys: string[] }> {
+  let stdout = ''
   try {
-    const { stdout } = await runFile('git', [...gitSafetyOptions(), 'config', '--includes', '--show-scope', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process)$'], cwd, 5_000)
-    const names = stdout.split('\n')
-      .map((line) => line.trim().split('\t'))
-      .filter(([scope, key]) => key && (scope === 'local' || scope === 'worktree'))
-      .map(([, key]) => key!.slice('filter.'.length, key!.lastIndexOf('.')))
-    return [...new Set(names)].filter(Boolean)
+    stdout = (await runFile('git', [...gitSafetyOptions(), 'config', '--includes', '--show-scope', '--name-only', '--get-regexp', '^(filter\\..*\\.(clean|smudge|process)|gpg\\..*)$'], cwd, 5_000)).stdout
   } catch {
-    return [] // exit 1: none declared
+    // exit 1: none declared
+  }
+  const keys = stdout.split('\n')
+    .map((line) => line.trim().split('\t'))
+    .filter(([scope, key]) => key && (scope === 'local' || scope === 'worktree'))
+    .map(([, key]) => key!)
+  const filterDrivers = keys.filter((key) => /^filter\./i.test(key)).map((key) => key.slice('filter.'.length, key.lastIndexOf('.')))
+  return {
+    filterDrivers: [...new Set(filterDrivers)].filter(Boolean),
+    signingKeys: [...new Set(keys.filter((key) => GIT_SIGNING_PROGRAM_KEY.test(key)))],
   }
 }
 
@@ -181,17 +195,19 @@ async function isGitRepository(cwd: string): Promise<boolean> {
  * Runs git with the safety options; the repository's own filter drivers are
  * switched off. `writesContent` (add, checkout): with such a driver declared,
  * the switched-off driver would store or check out the wrong content, so
- * those are refused instead.
+ * those are refused instead. `signs` (commit): a signing program set in the
+ * repository's own config is refused (switching it off would silently drop
+ * the signature).
  */
-async function gitRun(args: readonly string[], cwd: string, options: { writesContent?: boolean } = {}): Promise<TR> {
+async function gitRun(args: readonly string[], cwd: string, options: { writesContent?: boolean; signs?: boolean } = {}): Promise<TR> {
   try {
-    const drivers = await gitRepoFilterDrivers(cwd)
-    if (options.writesContent && drivers.length > 0) {
-      return {
-        ok: false,
-        output: `This repository's own git config declares filter drivers (${drivers.join(', ')}), which run programs. git ${args[0]} is not run from this tool; use run_command so the owner sees the exact command.`,
-      }
-    }
+    const { filterDrivers: drivers, signingKeys } = await gitRepoProgramConfig(cwd)
+    const refuse = (what: string) => ({
+      ok: false,
+      output: `This repository's own git config sets ${what}, which run programs. git ${args[0]} is not run from this tool; use run_command so the owner sees the exact command.`,
+    })
+    if (options.writesContent && drivers.length > 0) return refuse(`filter drivers (${drivers.join(', ')})`)
+    if (options.signs && signingKeys.length > 0) return refuse(`signing programs (${signingKeys.join(', ')})`)
     const { stdout, stderr } = await runFile('git', [...gitSafetyOptions(drivers), ...args], cwd, 15_000)
     const out = (stdout + (stderr ? `\n[stderr]\n${stderr}` : '')).trim()
     return { ok: true, output: out || '(no output)' }
@@ -311,7 +327,7 @@ export async function execGitCommit(inp: Record<string, unknown>, cwd: string): 
     return { ok: false, output: `Not a git repository: ${cwd}\nCannot create a commit without a git repository.` }
   }
   const msg = String(inp.message ?? 'chore: update')
-  return gitRun(['commit', '-m', msg], cwd)
+  return gitRun(['commit', '-m', msg], cwd, { signs: true })
 }
 
 export async function execGitBranch(inp: Record<string, unknown>, cwd: string): Promise<TR> {
