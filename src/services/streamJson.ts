@@ -4,7 +4,7 @@
  * Stdout becomes a stream of JSON objects, one per line (NDJSON), each with
  * the format version `v` and a sequence number `seq`:
  *
- *   {"v":1,"seq":1,"type":"start","engine":"0.2.81"}
+ *   {"v":1,"seq":1,"type":"start","engine":"0.2.82"}
  *   {"v":1,"seq":2,"type":"todo","items":[{"id":"t1","content":"读配置","status":"in_progress"}]}
  *   {"v":1,"seq":3,"type":"tool_start","callId":"call_4","tool":"read_file","label":"读取文件","detail":"src/app.ts"}
  *   {"v":1,"seq":4,"type":"tool_end","callId":"call_4","tool":"read_file","status":"ok"}
