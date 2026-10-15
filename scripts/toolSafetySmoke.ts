@@ -462,6 +462,65 @@ section('N1b git signing programs and other program keys')
   }
 }
 
+// ── N1c: no git extra descends into a submodule (its own config can declare filters) ──
+section('N1c submodules: their own filter drivers never run')
+{
+  const emptyGlobal = path.join(sandbox, 'sub-empty.gitconfig')
+  fs.writeFileSync(emptyGlobal, '')
+  const saved = { global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM }
+  process.env.GIT_CONFIG_GLOBAL = emptyGlobal
+  process.env.GIT_CONFIG_NOSYSTEM = '1'
+  const env = { ...gitEnv, GIT_CONFIG_GLOBAL: emptyGlobal, GIT_CONFIG_NOSYSTEM: '1' }
+  try {
+    const upstream = path.join(sandbox, 'sub-upstream')
+    const outer = path.join(sandbox, 'sub-outer')
+    for (const dir of [upstream, outer]) fs.mkdirSync(dir, { recursive: true })
+    const run = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, env, stdio: 'pipe' })
+    run(upstream, 'init', '-q', '-b', 'main')
+    fs.writeFileSync(path.join(upstream, 'inner.txt'), 'inner\n')
+    run(upstream, 'add', 'inner.txt')
+    run(upstream, 'commit', '-q', '-m', 'inner')
+    run(outer, 'init', '-q', '-b', 'main')
+    fs.writeFileSync(path.join(outer, 'top.txt'), 'top\n')
+    run(outer, 'add', 'top.txt')
+    run(outer, 'commit', '-q', '-m', 'top')
+    run(outer, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', upstream, 'sub')
+    run(outer, 'commit', '-q', '-m', 'add sub')
+    const subDir = path.join(outer, 'sub')
+    const marker = path.join(sandbox, 'sub-marker-clean')
+    const filter = path.join(sandbox, 'sub-filter.sh')
+    fs.writeFileSync(filter, `#!/bin/sh\ntouch "${marker}"\ncat\n`, { mode: 0o755 })
+    // The submodule's own config (.git/modules/sub/config) declares the driver; its worktree uses it.
+    run(subDir, 'config', 'filter.evil.clean', filter)
+    fs.writeFileSync(path.join(subDir, '.gitattributes'), '*.txt filter=evil\n')
+    // Same size, new mtime: git has to hash the file (through the clean filter) to know whether it changed.
+    fs.writeFileSync(path.join(subDir, 'inner.txt'), 'inner\n')
+    const later = new Date(Date.now() + 60_000)
+    fs.utimesSync(path.join(subDir, 'inner.txt'), later, later)
+    fs.writeFileSync(path.join(outer, 'top.txt'), 'top changed\n')
+    run(outer, 'status', '--short')
+    check('precondition: plain git status in the outer repository runs the submodule\'s clean filter', fs.existsSync(marker))
+    fs.rmSync(marker, { force: true })
+    const ran: string[] = []
+    const results: Array<{ ok: boolean; output: string }> = []
+    for (const [name, input] of [['git_status', {}], ['git_diff', {}], ['git_add', { paths: ['.'] }], ['git_commit', { message: 'outer only' }], ['git_log', { limit: 2 }]] as const) {
+      fs.utimesSync(path.join(subDir, 'inner.txt'), later, new Date(later.getTime() + results.length * 1000))
+      results.push(await extras.executeExtraTool(name, input, outer))
+      if (fs.existsSync(marker)) ran.push(name)
+      fs.rmSync(marker, { force: true })
+    }
+    check('git_status, git_diff, git_add, git_commit and git_log never run a submodule\'s own filter driver',
+      results.every((r) => r.ok) && ran.length === 0, { ran, outputs: results.filter((r) => !r.ok).map((r) => r.output.slice(0, 200)) })
+    check('the safety options keep git out of submodules',
+      ['submodule.recurse=false', 'diff.ignoreSubmodules=all', 'status.submoduleSummary=false'].every((option) => extras.gitSafetyOptions().includes(option)))
+  } finally {
+    for (const [key, value] of [['GIT_CONFIG_GLOBAL', saved.global], ['GIT_CONFIG_NOSYSTEM', saved.nosystem]] as const) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
+
 // ── N4: Windows program resolution ──────────────────────────────────────────
 section('N4 Windows programs never come from the working directory')
 {
