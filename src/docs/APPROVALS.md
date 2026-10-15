@@ -109,9 +109,11 @@ asks: `rm`, `tee`, `dd`, `mv`, `cp`, `chmod`, `chown`, `truncate`,
 `shred`, `trash`, `rsync`, `aria2c`, `yt-dlp`, a redirect, anything the
 delete check treats as destructive (`-delete`, `--delete`, `of=`, inline
 code that writes), and the writing uses of others (`git clean`/`rm`/`mv`/
-`reset --hard`/`checkout --`, `sed -i`, `curl -o`/`-O`, `wget` unless to
-stdout, `find -delete`/`-exec`); read-only uses (`watch git status`,
-`watch -n5 curl -s …`, `tmux new -d "git pull"`) do not. `xargs` counts by
+`restore`/`reset --hard`/`checkout [<ref>] --`, also after git's global
+options and their values: `git -C /srv clean`, `git --work-tree /srv
+checkout -- .`; `sed -i`, `curl -o`/`-O` unless to `/dev/null` or stdout,
+`wget` unless to stdout, `find -delete`/`-exec`); read-only uses (`watch git
+status`, `watch -n5 curl -s …`, `tmux new -d "git -C /srv pull"`) do not. `xargs` counts by
 the command it runs, read past its own options (GNU `-i`, `-l`, `-e` take
 an attached value only; BSD `-J`, `-R`, `-S` the next word) and past
 wrappers (`xargs nice cp`); options it does not know fall back to the
@@ -119,9 +121,10 @@ broad scan. Commands piped into `at`, `batch` or `expect` (or read by `at`
 from a file) run like a pipe into a shell: high risk. A program the
 classifier does not know (or a script run by an interpreter or a shell:
 `bash deploy.sh …`, `node run.js …`, `python -W ignore run.py …`) asks when
-such a word is its first operand, or starts an argument holding a whole
-command (a string with spaces, or a part after `;`, `&`, `|`):
-`./deploy.sh rm …`, `some-runner "cd x; rm y"`.
+such a word is its first operand (with the words after it: `some-runner git
+-C /srv clean -fdx`), or starts an argument holding a whole command (a
+string with spaces, or a part after `;`, `&`, `|`): `./deploy.sh rm …`,
+`some-runner "cd x; rm y"`.
 
 A web server run as another user (`sudo`, `doas`, `su`, `runuser`, a
 system service through `systemd-run`, `-p User=`) asks at medium risk

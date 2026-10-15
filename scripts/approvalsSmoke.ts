@@ -1300,6 +1300,49 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
     JSON.stringify(analyzeDeletes('su --logi -c "rm -rf build" nobody', cwd)))
   assert('preview: round 6 — read-only runners stay quiet', ['watch git status', 'watch -n5 curl -s https://example.com/', 'tmux new -d "git pull"', 'screen -dm wget -qO- https://example.com/', 'tmux new -d "find . -name x"', 'ls | xargs -I {} grep x {}', 'ls | xargs -0 -n1 grep -l install'].every((c) => kind(c) === null),
     JSON.stringify(['watch git status', 'watch -n5 curl -s https://example.com/', 'tmux new -d "git pull"', 'screen -dm wget -qO- https://example.com/', 'tmux new -d "find . -name x"', 'ls | xargs -I {} grep x {}', 'ls | xargs -0 -n1 grep -l install'].map((c) => [c, kind(c)])))
+  // Round 7: git's global options whose value is the next word (-C /srv, --git-dir /x, --work-tree /x, -c k=v)
+  // come before the subcommand: a destructive git behind them, through a runner, asks with the runner named.
+  {
+    const forms: Array<[string, (git: string) => string]> = [
+      ['tmux', (g) => `tmux new -d "${g}"`],
+      ['screen', (g) => `screen -dm ${g}`],
+      ['watch', (g) => `watch "${g}"`],
+      ['unshare', (g) => `unshare -r ${g}`],
+      ['nsenter', (g) => `nsenter -t 1 -m ${g}`],
+      ['firejail', (g) => `firejail ${g}`],
+      ['bwrap', (g) => `bwrap --bind / / ${g}`],
+      ['chroot', (g) => `chroot / ${g}`],
+      ['at', (g) => `at now <<< "${g}"`],
+      ['at', (g) => `at now <<'EOF'\n${g}\nEOF`],
+    ]
+    const gits = ['git -C /srv clean -fdx', 'git -C /srv reset --hard', 'git -C /srv checkout -- .', 'git -C /srv restore .', 'git --git-dir /srv/.git reset --hard',
+      'git --work-tree /srv checkout -- .', 'git -c core.quotepath=off -C /srv clean -fd', 'git -C /srv reset -q --hard', 'git -C /srv checkout main -- .', 'git -C /srv rm -r src']
+    for (const [head, form] of forms) {
+      for (const git of gits) {
+        const command = form(git)
+        const found = analyzeDeletes(command, cwd)
+        assert(`preview: round 7 — a destructive git with a separate -C/--git-dir/--work-tree value through ${head} asks — ${JSON.stringify(command)}`,
+          kind(command) === 'delete_outside_workspace' && found.unverifiable === `runs a command through ${head} that may delete, write or serve files`, JSON.stringify(found))
+      }
+    }
+    // A value with a space, quoted as one word, in the runner's own words.
+    assert('preview: round 7 — git -C "/srv x" clean through screen asks', analyzeDeletes('screen -dm git -C "/srv x" clean -fdx', cwd).unverifiable === 'runs a command through screen that may delete, write or serve files')
+    // A program the classifier cannot follow, given git as its command (as words, or as one string).
+    for (const command of ['myrunner git -C /srv clean -fdx', 'myrunner "git -C /srv clean -fdx"', 'myrunner git --work-tree /srv checkout -- .', 'bash run.sh git -C /srv reset --hard']) {
+      assert(`preview: round 7 — a destructive git handed to a program the classifier cannot follow asks — ${command}`, kind(command) === 'delete_outside_workspace' && /cannot follow/.test(analyzeDeletes(command, cwd).unverifiable ?? ''), JSON.stringify(analyzeDeletes(command, cwd)))
+    }
+    // Read-only git behind the same options stays quiet.
+    const quiet = ['tmux new -d "git -C /srv pull"', 'watch git -C /srv status', 'screen -dm git -C /srv log --grep restore', 'tmux new -d "git -C /srv commit -m restore"', 'tmux new -d "git -C /srv checkout main"',
+      'watch "git --git-dir /srv/.git fetch"', 'myrunner git -C /srv status', 'unshare -r git -C /srv diff']
+    assert('preview: round 7 — read-only git behind -C stays quiet', quiet.every((c) => kind(c) === null), JSON.stringify(quiet.map((c) => [c, kind(c)])))
+    // curl -o to a sink inside a runner writes no file, as for curl run directly; to a real path it still asks.
+    const sinks = ['tmux new -d "curl -so /dev/null https://example.com/"', 'watch curl -s -o /dev/null -w %{http_code} https://example.com/', 'tmux new -d "curl --output /dev/null https://example.com/"',
+      'tmux new -d "curl --output=/dev/null https://example.com/"', 'screen -dm curl -sSo - https://example.com/', 'curl -so /dev/null https://example.com/']
+    assert('preview: round 7 — curl -o /dev/null inside a runner needs nothing', sinks.every((c) => kind(c) === null), JSON.stringify(sinks.map((c) => [c, kind(c)])))
+    for (const command of ['tmux new -d "curl -so /etc/x https://example.com/"', 'tmux new -d "curl -o /dev/null -o /etc/x https://example.com/"', 'screen -dm curl -O https://example.com/a', 'watch "curl -o /dev/nullx https://example.com/"']) {
+      assert(`preview: round 7 — curl writing a real file inside a runner still asks — ${command}`, kind(command) === 'delete_outside_workspace', JSON.stringify(analyzeDeletes(command, cwd)))
+    }
+  }
   // check(): a relative target after a directory not known before it runs is itself reported (not only the reason).
   assert('preview: round 6 — the relative target after an unknown directory is named', analyzeDeletes('sudo -i rm -rf build', cwd).outside.includes('build') && analyzeDeletes('cd "$D" && rm -f notes.txt', cwd).outside.includes('notes.txt'), JSON.stringify(analyzeDeletes('sudo -i rm -rf build', cwd)))
   // Ordinary commands do not start asking.

@@ -55,6 +55,11 @@ function setup(): void {
   fs.writeFileSync(path.join(site, 'tone.wav'), wav(10));
   fs.writeFileSync(path.join(site, 'audio.html'), '<!doctype html><title>audio</title><audio id="a" src="tone.wav" preload="auto"></audio>');
   fs.writeFileSync(path.join(site, 'opener.html'), '<!doctype html><title>opener</title><h1>OPENER</h1>');
+  // A stylesheet reached through a symlink inside the workspace: its real path is elsewhere in the workspace.
+  fs.mkdirSync(path.join(ws, 'sites', 'shared'), { recursive: true });
+  fs.writeFileSync(path.join(ws, 'sites', 'shared', 'theme.css'), 'h1 { color: rgb(0, 128, 0); }');
+  fs.symlinkSync('../shared/theme.css', path.join(site, 'linked.css'));
+  fs.writeFileSync(path.join(site, 'linked.html'), '<!doctype html><title>linked</title><link rel="stylesheet" href="linked.css"><h1>LINKED</h1>');
   fs.mkdirSync(path.join(ws2, 'sites', 'q'), { recursive: true });
   fs.writeFileSync(path.join(ws2, 'sites', 'q', 'index.html'), '<!doctype html><title>q</title><h1>OTHER-RUN</h1>');
 }
@@ -148,6 +153,21 @@ async function main(): Promise<void> {
   });
   assert.ok(Math.abs(audio.duration - 10) < 0.5 && audio.at >= 7.5, JSON.stringify(audio));
   ok(`an upper-case .HTML, a file with no extension, a ${BIG / 1024 / 1024} MB file and seeking in audio all work through the guard`);
+
+  // The browser loads the checked real path, not the name it asked for (a symlink swapped after the check is not followed).
+  {
+    const tab = await session.getActivePage();
+    const loaded: string[] = [];
+    const onResponse = (r: { url(): string }) => void loaded.push(r.url());
+    tab.on('response', onResponse);
+    await tools.executeBrowserNavigate({ type: 'browser_navigate', path: 'sites/p/linked.html' }, context);
+    const color = await (await session.getActivePage()).evaluate(() => getComputedStyle(document.querySelector('h1')!).color);
+    tab.off('response', onResponse);
+    const real = pathToFileURL(fs.realpathSync(path.join(site, 'linked.css'))).href;
+    assert.equal(color, 'rgb(0, 128, 0)', 'the symlinked stylesheet did not apply');
+    assert.ok(loaded.includes(real) && !loaded.some((u) => u.endsWith('/linked.css')), `the browser loaded ${JSON.stringify(loaded)}, not ${real}`);
+    ok('a symlinked stylesheet inside the workspace loads from its checked real path');
+  }
 
   // The URL itself: a line break or a control character in the scheme is refused (also for a new tab).
   for (const url of [`fi\nle://${secret}`, `\x01${secretUrl}`, `\t${secretUrl}`, `view-source:fi\tle://${secret}`, secretUrl]) {

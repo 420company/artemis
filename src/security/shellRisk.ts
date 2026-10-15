@@ -872,14 +872,21 @@ const RUNNERS = new Set([
   'cgexec', 'numactl', 'prlimit', 'capsh', 'dbus-run-session', 'systemd-inhibit', 'xvfb-run', 'catchsegv', 'ltrace', 'valgrind',
   'entr', 'watchexec', 'nodemon', 'dtach', 'abduco', 'nq', 'tsp', 'pueue', 'sem', 'expect', 'sshpass',
 ])
+/**
+ * git that deletes or overwrites files in its work tree: clean, rm, mv, reset --hard, checkout [<ref>] --,
+ * restore, after any global options, those whose value is the next word too (git -C /srv clean).
+ * Reading an option as taking a value only ever adds a match (the regex tries both readings).
+ */
+const GIT_WRITE = `git\\s+(?:(?:-C|-c|--git-dir|--work-tree|--namespace|--exec-path|--super-prefix|--config-env|--attr-source)\\s+(?:"[^"]*"|'[^']*'|[^\\s;&|'"]+)\\s+|-\\S+\\s+)*(?:(?:clean|rm|mv|restore)\\b|reset\\s+(?:-\\S+\\s+)*--hard\\b|checkout\\s+(?:[^\\s;&|]+\\s+)*?--(?=$|[\\s;&|)}'"\`]))`
 /** A word that deletes, writes or serves when it runs, anywhere in a runner's arguments (also inside a quoted string). */
 const RUN_WORD = new RegExp([
   // Commands that delete or write whatever their arguments.
   `(?:^|[\\s;&|(){}'"\`])(?:[\\w.~+-]*/)*(?:rm|rmdir|unlink|shred|srm|wipe|trash|trash-put|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|aria2c|yt-dlp|youtube-dl|axel|rsync|xargs)(?=$|[\\s;&|)}'"\`])`,
   // Commands that only write in some uses: git clean/rm/mv/reset --hard/checkout --, sed -i, curl -o/-O, wget (it saves unless to stdout), find -delete/-exec.
-  `(?:^|[\\s;&|(){}'"\`/])git\\s+(?:-\\S+\\s+)*(?:clean|rm|mv|reset\\s+--hard|checkout\\s+--|restore)\\b`,
+  `(?:^|[\\s;&|(){}'"\`/])${GIT_WRITE}`,
   `(?:^|[\\s;&|(){}'"\`/])sed\\b[^;&|]*\\s(?:-[A-Za-z]*i|--in-place)`,
-  `(?:^|[\\s;&|(){}'"\`/])curl\\b[^;&|]*\\s(?:-[A-Za-z]*[oO]|--output|--remote-name|--output-dir)`,
+  // curl -o to a sink (/dev/null, stdout) writes no file, as for curl run directly.
+  `(?:^|[\\s;&|(){}'"\`/])curl\\b[^;&|]*\\s(?:-[A-Za-z]*O|--remote-name|--output-dir|(?:-[A-Za-z]*o|--output)(?![\\s=]*(?:/dev/(?:null|stdout|stderr|tty)|-)(?:$|[\\s;&|)}'"\`])))`,
   `(?:^|[\\s;&|(){}'"\`/])wget\\b(?![^;&|]*(?:\\s-[A-Za-z]*O\\s*-(?:\\s|$)|--spider|--output-document=?-(?:\\s|$)))`,
   `(?:^|[\\s;&|(){}'"\`/])find\\b[^;&|]*\\s-(?:delete|exec|execdir|ok|okdir|fprint\\w*|fls)\\b`,
   '>',
@@ -891,7 +898,7 @@ const READ_INTO_RUNNERS = new Set(['su', 'runuser', 'flock', 'systemd-run'])
 /** A command name that deletes, writes or runs others, as xargs's command. */
 const XARGS_RISKY = /^(?:rm|rmdir|unlink|shred|srm|wipe|trash|trash-put|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|sed|curl|wget|aria2c|rsync|git|find|xargs|env|sudo|doas|perl|ruby|php|node|deno|bun|lua|python[0-9.]*|(?:ba|z|k|da)?sh)$/
 /** The same as a command of its own: the first operand, or the start of a string (or a part after ;, &, |). */
-const RUN_WORD_AT_START = /^(?:[\w.~+-]*\/)*(?:rm|rmdir|unlink|shred|srm|wipe|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|httpd|http-server|serve)$|(?:^|[;&|]\s*)(?:[\w.~+-]*\/)*(?:rm|rmdir|unlink|shred|srm|wipe|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|http-server|serve|httpd)\s|\bhttp\.server\b|\bSimpleHTTPServer\b|(?:^|[;&|]\s*)php\b[^;&|]*\s-S|>/
+const RUN_WORD_AT_START = new RegExp(String.raw`^(?:[\w.~+-]*\/)*(?:rm|rmdir|unlink|shred|srm|wipe|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|httpd|http-server|serve)$|(?:^|[;&|]\s*)(?:[\w.~+-]*\/)*(?:rm|rmdir|unlink|shred|srm|wipe|tee|dd|mv|cp|install|ln|chmod|chown|chgrp|truncate|http-server|serve|httpd)\s|\bhttp\.server\b|\bSimpleHTTPServer\b|(?:^|[;&|]\s*)php\b[^;&|]*\s-S|>` + `|(?:^|[;&|]\\s*)(?:[\\w.~+-]*/)*${GIT_WRITE}`)
 /**
  * Commands whose arguments are data, not a command they run: for any other
  * (an unknown program or a script), a command word at the start of an
@@ -1184,7 +1191,8 @@ export function analyzeDeletes(fullCommand: string, cwd: string, depth = 0): Del
       // All the arguments as one line (`git clean -fdx` given as separate words; a word's use is read
       // with the words after it), and each string that holds a command of its own.
       const runnerWords = [...plain, ...(hereString ? [hereString] : []), ...(parsed.heredoc ? [parsed.heredoc.body] : [])]
-      const runnerText = [runnerWords.join(' '), ...runnerWords.filter((w) => /\s/.test(w))]
+      // The line once more with its spaced words quoted (git -C "/srv x" clean: the value is one word).
+      const runnerText = [runnerWords.join(' '), runnerWords.map(quoteSpaced).join(' '), ...runnerWords.filter((w) => /\s/.test(w))]
       // `head` is the command past the wrappers commandHead reads (env, nice, timeout, …): those are checked as what they run.
       const inner = READ_INTO_RUNNERS.has(head) && depth < 2 ? unwrapRunner(head, plain) : undefined
       if (head === 'busybox' && plain[0] === 'httpd') {
@@ -1522,10 +1530,18 @@ function xargsCommand(args: string[]): { words: string[]; certain: boolean } {
   return { words: [], certain }
 }
 
+/** A word as one shell word again when it holds a space (the rest as they are, for the patterns that read them). */
+function quoteSpaced(word: string): string {
+  return /\s/.test(word) ? shellQuote(word) : word
+}
+
 /** A program's arguments carry a command that deletes, writes or serves: as the first operand, or as a string holding a whole command. */
 function passesACommand(args: string[], texts: string[]): boolean {
-  const operands = args.filter((a) => !a.startsWith('-'))
-  return (operands[0] !== undefined && RUN_WORD_AT_START.test(operands[0])) || texts.some((a) => /\s/.test(a) && RUN_WORD_AT_START.test(a.trim()))
+  const first = args.findIndex((a) => !a.startsWith('-'))
+  if (first < 0) return texts.some((a) => /\s/.test(a) && RUN_WORD_AT_START.test(a.trim()))
+  // The first operand as a command, with the words after it (git -C /srv clean: git's use is in its arguments).
+  const rest = args.slice(first)
+  return RUN_WORD_AT_START.test(rest[0]!) || RUN_WORD_AT_START.test(rest.map(quoteSpaced).join(' ')) || texts.some((a) => /\s/.test(a) && RUN_WORD_AT_START.test(a.trim()))
 }
 
 /** curl's short options that take a value (the rest of the cluster, or the next word). */
