@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
 import path from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { resolveWorkspaceIntent } from '../src/cli/workspaceIntent.js'
@@ -39,7 +40,10 @@ const englishExplicit = await resolveWorkspaceIntent(`switch to ${tmpdir()} and 
 assert.ok(englishExplicit)
 assert.equal(englishExplicit.workspacePath, tmpdir())
 
-const fakeHome = path.join(tmpdir(), 'artemis-workspace-intent-home')
+// A fresh directory of its own: the checks below need a `.artemis` that does
+// not exist, which cannot be assumed of the shared temp dir.
+const scratch = mkdtempSync(path.join(tmpdir(), 'artemis-workspace-intent-'))
+const fakeHome = path.join(scratch, 'artemis-workspace-intent-home')
 const errorQuotedPath = path.join(path.dirname(fakeHome), '.artemis')
 const quotedError = `为什么报错“错误：EACCES: permission denied, mkdir '${errorQuotedPath}'”`
 assert.equal(await resolveWorkspaceIntent(quotedError, cwd, fakeHome), null)
@@ -47,7 +51,7 @@ assert.equal(await resolveWorkspaceIntent(quotedError, cwd, fakeHome), null)
 const missingDataRoot = await resolveWorkspaceIntent(`进入 ${errorQuotedPath} 继续`, cwd, fakeHome)
 assert.equal(missingDataRoot, null)
 
-const existingPathInBody = path.join(tmpdir(), 'artemis-workspace-intent-existing')
+const existingPathInBody = path.join(scratch, 'artemis-workspace-intent-existing')
 const existingChildPath = path.join(existingPathInBody, 'index.ts')
 assert.equal(await resolveWorkspaceIntent(`请检查 ${existingChildPath} 为什么报错`, cwd, fakeHome), null)
 assert.equal(await resolveWorkspaceIntent(`run tests in ${tmpdir()}`, cwd, fakeHome), null)
@@ -163,4 +167,5 @@ if (explicitMediaResult) {
   )
 }
 
+rmSync(scratch, { recursive: true, force: true })
 console.log('workspaceIntent paste guard smoke: ok')

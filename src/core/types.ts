@@ -563,13 +563,6 @@ export type AgentAction =
       timeoutMs?: number;
     }
   | {
-      type: 'mcp_run_command';
-      serverId: string;
-      commandName: string;
-      args?: Record<string, unknown>;
-      timeoutMs?: number;
-    }
-  | {
       type: 'write_file';
       path: string;
       content: string;
@@ -1050,12 +1043,6 @@ export type AgentAction =
   | { type: 'post_update'; text: string }
   /** The run's plan as a checklist: the whole list each time (core/todoList.ts). */
   | { type: 'load_tools'; tools: string[] }
-  /** Wallet balance lookup via the hosted platform (tools/wallet/getBalance.ts). */
-  | { type: 'get_balance'; chain: string; address: string }
-  /** READ-ONLY swap quote via the hosted platform (tools/wallet/swapQuote.ts). No transaction is sent. */
-  | { type: 'swap_quote'; chain: string; from: string; to: string; amount: string }
-  /** Send a transaction via the hosted platform; always requires the owner's hard approval (tools/wallet/sendTransaction.ts). */
-  | { type: 'send_transaction'; chain: string; to: string; token: string; amount: string; quoteId?: string }
   | { type: 'todo'; todos: Array<{ id?: string; content: string; status?: TaskStatus }> }
   /** Keys, passwords, SSH bootstrap, VPN setup and checks for a server the agent set up (tools/serverSetup). */
   | ({ type: 'server_setup' } & Omit<import('../tools/serverSetup/serverSetup.js').ServerSetupAction, 'type'>)
@@ -1074,7 +1061,8 @@ export type AgentAction =
   | { type: 'ask_owner_for_code'; site: string; channel?: 'sms' | 'email' | 'authenticator' | 'other'; hint?: string; timeout_seconds?: number }
   | {
       type: 'edit_timeline';
-      action: 'list_segments' | 'replace_segment' | 'trim_segment' | 'add_subtitle' | 'remove_subtitle' | 'set_bgm' | 'render' | 'import_saga';
+      /** import_saga is a hidden alias of import_long_video, kept for older calls. */
+      action: 'list_segments' | 'replace_segment' | 'trim_segment' | 'add_subtitle' | 'remove_subtitle' | 'set_bgm' | 'render' | 'import_long_video' | 'import_saga';
       projectId?: string;
     }
   | ExtraAgentAction;
@@ -1091,7 +1079,6 @@ export const ALL_AGENT_ACTION_TYPES = [
   'mcp_call_tool',
   'mcp_read_resource',
   'mcp_get_prompt',
-  'mcp_run_command',
   'write_file',
   'insert_in_file',
   'replace_in_file',
@@ -1182,9 +1169,6 @@ export const ALL_AGENT_ACTION_TYPES = [
   'post_update',
   'todo',
   'load_tools',
-  'get_balance',
-  'swap_quote',
-  'send_transaction',
   'server_setup',
   'get_verification_code',
   'agent_mail_address',
@@ -1251,7 +1235,6 @@ export const RUNTIME_MANAGED_AGENT_ACTION_TYPES = [
   'mcp_call_tool',
   'mcp_read_resource',
   'mcp_get_prompt',
-  'mcp_run_command',
   'delegate_task',
   'spawn_background_workflow',
   'approve_builder_execution',

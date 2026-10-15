@@ -585,6 +585,11 @@ await test('approval cards: titles and summaries the owner sees (every kind, bot
     { type: 'mcp_call_tool', serverId: 'mail', toolName: 'send_email', args: { to: 'a@example.com', body: 'hi' } },
     { type: 'mcp_call_tool', serverId: 'shop', toolName: 'create_purchase', args: { amount: '12' } },
     { type: 'mcp_call_tool', serverId: 'site', toolName: 'publish_site', args: { url: 'https://example.com' } },
+    { type: 'npm_run', script: 'build' },
+    { type: 'git_commit', message: 'update' },
+    { type: 'format_code', path: 'src/a.ts' },
+    { type: 'delete_directory', path: '/etc/nginx/old' },
+    { type: 'download_file', url: 'https://example.com/a.zip', destination: '/etc/a.zip' },
   ] as const;
   for (const locale of ['zh-CN', 'en'] as const) {
     for (const action of actions) {
@@ -597,6 +602,79 @@ await test('approval cards: titles and summaries the owner sees (every kind, bot
       const { title, summary } = describeApprovalNeed({ kind, risk: 'medium', details: {} }, locale);
       expectClean(`approval ${kind} ${locale} (no details)`, `${title}\n${summary}`);
     }
+  }
+});
+
+// Text the model reads as a tool's description (hosts also list it): no
+// internal long-video name, no fee wording and no config file or key names.
+const DESCRIPTION_DENYLIST: Array<{ name: string; re: RegExp }> = [
+  { name: 'Saga', re: /saga/i },
+  { name: 'fee wording', re: /费用|计费|收费|扣费|余额|充值|\bbilled\b|\btop[\s-]?up\b/i },
+  { name: 'config file', re: /providers\.json/i },
+  { name: 'config key', re: /\bapprovalSecret\b|\bwallet\.(?:apiKey|baseUrl)\b/i },
+];
+function expectCleanDescription(where: string, text: string | undefined): void {
+  checked += 1;
+  if (!text) return;
+  const hits = DESCRIPTION_DENYLIST.filter(({ re }) => re.test(text)).map(({ name }) => name);
+  if (hits.length > 0) failures.push(`${where}: ${hits.join(', ')}\n    ${text.slice(0, 240)}`);
+}
+/** Every `description` in a JSON schema (enum values are inputs, not text). */
+function schemaDescriptions(value: unknown, out: string[] = []): string[] {
+  if (Array.isArray(value)) for (const item of value) schemaDescriptions(item, out);
+  else if (value && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (key === 'description' && typeof item === 'string') out.push(item);
+      else schemaDescriptions(item, out);
+    }
+  }
+  return out;
+}
+
+await test('tool descriptions: registry, native schemas and direct tools', async () => {
+  const { toolDefs } = await import('../src/tools/registry.js');
+  const { buildActionParametersSchema } = await import('../src/core/providerNativeTools.js');
+  const { ALL_AGENT_ACTION_TYPES } = await import('../src/core/types.js');
+  const { buildDirectNativeFunctionTools } = await import('../src/tools/directTools.js');
+  for (const def of toolDefs) expectCleanDescription(`registry ${def.type}`, def.description);
+  for (const type of ALL_AGENT_ACTION_TYPES) {
+    for (const text of schemaDescriptions(buildActionParametersSchema(type))) expectCleanDescription(`schema ${type}`, text);
+  }
+  for (const tool of buildDirectNativeFunctionTools()) {
+    expectCleanDescription(`direct ${tool.name}`, tool.description);
+    for (const text of schemaDescriptions(tool.parameters)) expectCleanDescription(`direct ${tool.name} schema`, text);
+  }
+});
+
+await test('timeline editor: results and errors as the user sees them', async () => {
+  const { executeEditTimeline } = await import('../src/tools/visual/timelineEditor.js');
+  const previousHome = process.env.ARTEMIS_HOME;
+  const previousMedia = process.env.ARTEMIS_MEDIA_OUTPUT_ROOT;
+  const root = mkdtempSync(path.join(os.tmpdir(), 'artemis-guard-timeline-'));
+  process.env.ARTEMIS_HOME = path.join(root, 'home');
+  process.env.ARTEMIS_MEDIA_OUTPUT_ROOT = path.join(root, 'media');
+  mkdirSync(path.join(root, 'media', 'long-video', 'empty'), { recursive: true });
+  try {
+    const run = (args: Record<string, unknown>) => executeEditTimeline({ type: 'edit_timeline', ...args }, { cwd: root });
+    const results = [
+      await run({ action: 'list_segments', projectId: 'missing' }),
+      await run({ action: 'import_long_video', projectId: 'missing' }),
+      await run({ action: 'import_long_video', projectId: 'empty' }),
+      await run({ action: 'import_saga', projectId: 'x', sagaProjectId: 'missing' }),
+      await run({ action: 'replace_segment', projectId: 'missing', segmentIndex: 1, newVideoPath: '/etc/x.mp4' }),
+      await run({ action: 'set_bgm', projectId: 'missing', audioPath: '/etc/x.mp3' }),
+      await run({ action: 'no_such_action' }),
+    ];
+    for (const result of results) {
+      assert.equal(typeof result.output, 'string');
+      // The output carries the tool's own action name, which is input the model typed.
+      expectClean(`edit_timeline ${result.action}`, String(result.output).replace(/"action": "[a-z_]+"/g, '"action": "…"'));
+    }
+  } finally {
+    if (previousHome === undefined) delete process.env.ARTEMIS_HOME;
+    else process.env.ARTEMIS_HOME = previousHome;
+    if (previousMedia === undefined) delete process.env.ARTEMIS_MEDIA_OUTPUT_ROOT;
+    else process.env.ARTEMIS_MEDIA_OUTPUT_ROOT = previousMedia;
   }
 });
 

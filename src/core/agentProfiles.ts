@@ -175,10 +175,6 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   'transcribe_audio',
   // Phone calls for the owner (each one approved by the owner first).
   'place_call',
-  // Wallet: read-only lookups; sends always need the owner's hard approval.
-  'get_balance',
-  'swap_quote',
-  'send_transaction',
   // Office documents (decks, documents, spreadsheets).
   'create_presentation',
   'create_document',
@@ -250,7 +246,6 @@ export function getAllowedActionTypesForProfile(
       'mcp_call_tool',
       'mcp_read_resource',
       'mcp_get_prompt',
-      'mcp_run_command',
       'write_file',
       'insert_in_file',
       'replace_in_file',

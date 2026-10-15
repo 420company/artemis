@@ -149,10 +149,6 @@ export function statusForAction(action: Pick<AgentAction, 'type'> & Record<strin
       const tool = String(action.toolName ?? action.tool_name ?? action.tool ?? action.name ?? '');
       return { phase: 'working', activity: SEND_WORDS.test(tool) ? 'sending' : 'using_service' };
     }
-    case 'mcp_run_command': {
-      const command = String(action.commandName ?? action.command_name ?? action.command ?? action.name ?? '');
-      return { phase: 'working', activity: SEND_WORDS.test(command) ? 'sending' : 'using_service' };
-    }
     default:
       if (type.startsWith('mcp__')) return { phase: 'working', activity: SEND_WORDS.test(type) ? 'sending' : 'using_service' };
       if (type.startsWith('browser_')) return { phase: 'working', activity: 'browsing' };

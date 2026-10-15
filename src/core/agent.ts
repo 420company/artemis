@@ -144,7 +144,6 @@ import {
   getSuggestedMcpAuthState,
   liveToolDescriptor,
   readMcpServerResource,
-  runMcpServerCommand,
 } from '../mcp/client.js';
 import { formatDependencyPrompt, installNpmMcpPackage } from '../mcp/installer.js';
 import { McpServerStore, type McpServerConfig } from '../mcp/store.js';
@@ -640,18 +639,6 @@ function buildActionFromLooseArgs(
         type: 'mcp_get_prompt',
         serverId,
         promptName,
-        args: getLooseObjectArg(args, 'args', 'arguments', 'input', 'params') ?? {},
-        timeoutMs: getLooseIntegerArg(args, 'timeoutMs', 'timeout_ms', 'timeout'),
-      };
-    }
-    case 'mcp_run_command': {
-      const serverId = getLooseStringArg(args, 'serverId', 'server_id', 'server');
-      const commandName = getLooseStringArg(args, 'commandName', 'command_name', 'command', 'name');
-      if (!serverId?.trim() || !commandName?.trim()) return null;
-      return {
-        type: 'mcp_run_command',
-        serverId,
-        commandName,
         args: getLooseObjectArg(args, 'args', 'arguments', 'input', 'params') ?? {},
         timeoutMs: getLooseIntegerArg(args, 'timeoutMs', 'timeout_ms', 'timeout'),
       };
@@ -1558,7 +1545,6 @@ function isConcreteExecutionAction(action: AgentAction): boolean {
     case 'synthesize_speech':
     case 'transcribe_audio':
     case 'place_call':
-    case 'send_transaction':
     case 'create_presentation':
     case 'create_document':
     case 'create_spreadsheet':
@@ -1994,9 +1980,6 @@ function buildToolUiPayload(
     case 'place_call':
       payload.goal = action.goal;
       break;
-    case 'send_transaction':
-      payload.summary = `${action.amount} ${action.token} to ${action.to}`;
-      break;
     default:
       break;
   }
@@ -2024,8 +2007,6 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `mcp_read_resource ${action.serverId}/${action.uri}`;
     case 'mcp_get_prompt':
       return `mcp_get_prompt ${action.serverId}/${action.promptName}`;
-    case 'mcp_run_command':
-      return `mcp_run_command ${action.serverId}/${action.commandName}`;
     case 'write_file':
       return `write_file ${action.path}`;
     case 'insert_in_file':
@@ -2052,12 +2033,6 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `transcribe_audio engine=${action.engine ?? 'configured'} path=${truncateInline(action.inputPath, 120)}`;
     case 'place_call':
       return `place_call goal=${truncateInline(action.goal, 120)}`;
-    case 'get_balance':
-      return `get_balance chain=${action.chain} address=${truncateInline(action.address, 40)}`;
-    case 'swap_quote':
-      return `swap_quote ${truncateInline(action.amount, 20)} ${truncateInline(action.from, 20)} to ${truncateInline(action.to, 20)}`;
-    case 'send_transaction':
-      return `send_transaction ${truncateInline(action.amount, 20)} ${truncateInline(action.token, 20)} to ${truncateInline(action.to, 40)}`;
     case 'create_presentation':
     case 'create_document':
     case 'create_spreadsheet':
@@ -2238,12 +2213,6 @@ function summarizeActionForWorkflow(action: AgentAction): string {
       return `ask_owner_for_code ${truncateInline(action.site, 80)}`;
     case 'load_tools':
       return `load_tools ${action.tools.join(', ')}`;
-    case 'get_balance':
-      return `get_balance ${action.chain} ${action.address}`;
-    case 'swap_quote':
-      return `swap_quote ${action.chain} ${action.from}->${action.to} ${action.amount}`;
-    case 'send_transaction':
-      return `send_transaction ${action.chain} ${action.token} ${action.amount} to ${action.to}`;
     case 'edit_timeline':
       return `edit_timeline ${action.action}${action.projectId ? ` project=${action.projectId}` : ''}`;
     case 'delete_file': return `delete_file`;
@@ -3097,20 +3066,6 @@ function normalizeActions(input: unknown): AgentAction[] {
             type: 'mcp_get_prompt',
             serverId: entry.serverId,
             promptName: entry.promptName,
-            args: asUnknownRecord(entry.args),
-            timeoutMs: asPositiveInteger(entry.timeoutMs),
-          });
-        }
-        break;
-      case 'mcp_run_command':
-        if (
-          typeof entry.serverId === 'string' &&
-          typeof entry.commandName === 'string'
-        ) {
-          actions.push({
-            type: 'mcp_run_command',
-            serverId: entry.serverId,
-            commandName: entry.commandName,
             args: asUnknownRecord(entry.args),
             timeoutMs: asPositiveInteger(entry.timeoutMs),
           });
@@ -5248,84 +5203,6 @@ async function executeMcpGetPromptAction(
   }
 }
 
-async function executeMcpRunCommandAction(
-  action: Extract<AgentAction, { type: 'mcp_run_command' }>,
-  options: RunAgentOptions,
-  abortSignal?: AbortSignal,
-): Promise<{ ok: boolean; output: string; error?: ToolError }> {
-  const { store, data, server } = await loadMcpServerState(
-    options.cwd,
-    action.serverId,
-  );
-
-  if (!server) {
-    const message = `Configured MCP server ${action.serverId} was not found.`;
-    return {
-      ok: false,
-      output: message,
-      error: buildToolError('mcp_server_not_found', message, {
-        retryable: false,
-      }),
-    };
-  }
-
-  if (!server.enabled) {
-    const message = `MCP server ${action.serverId} is disabled.`;
-    return {
-      ok: false,
-      output: message,
-      error: buildToolError('mcp_server_disabled', message, {
-        retryable: false,
-      }),
-    };
-  }
-
-  try {
-    const result = await runMcpServerCommand({
-      server,
-      cwd: options.cwd,
-      commandName: action.commandName,
-      args: action.args,
-      timeoutMs: action.timeoutMs,
-      abortSignal,
-    });
-    const nextServer = applyMcpRuntimeSuccess({
-      server: result.server,
-      authState: result.authState,
-      surface: result.surface,
-      notes: [`Last MCP command run succeeded: ${action.commandName}`],
-    });
-    await saveUpdatedMcpServer(store, data, nextServer);
-
-    return {
-      ok: true,
-      output: result.output,
-    };
-  } catch (error) {
-    const cancelled = buildMcpCancelledOutcome(error);
-    if (cancelled) {
-      return cancelled;
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    const latestData = await store.load();
-    const latestServer =
-      latestData.servers.find((entry) => entry.id === server.id) ?? server;
-    const nextServer = applyMcpRuntimeFailure({
-      server: latestServer,
-      authState: getSuggestedMcpAuthState(latestServer, error),
-      message,
-    });
-    await saveUpdatedMcpServer(store, latestData, nextServer);
-    return {
-      ok: false,
-      output: message,
-      error: buildToolError('mcp_run_command_failed', message, {
-        retryable: true,
-      }),
-    };
-  }
-}
-
 function mapPermissionModeForToolContext(
   mode: ReturnType<PermissionManager['getMode']>,
 ): ToolAccessMode {
@@ -5602,8 +5479,6 @@ async function executeAgentActionUnscrubbed(
       return executeMcpReadResourceAction(action, options, abortSignal);
     case 'mcp_get_prompt':
       return executeMcpGetPromptAction(action, options, abortSignal);
-    case 'mcp_run_command':
-      return executeMcpRunCommandAction(action, options, abortSignal);
     case 'approve_builder_execution':
       return approveBuilderExecution(session, action, options);
     case 'todo': {
@@ -5910,12 +5785,6 @@ function buildHeimdallActionMetadata(
         action_type: action.type,
         server_id: action.serverId,
         prompt_name: action.promptName,
-      };
-    case 'mcp_run_command':
-      return {
-        action_type: action.type,
-        server_id: action.serverId,
-        command_name: action.commandName,
       };
     case 'delegate_task':
       return {

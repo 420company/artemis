@@ -96,14 +96,6 @@ export type McpPromptGetResult = {
   server: McpServerConfig;
 };
 
-export type McpCommandRunResult = {
-  output: string;
-  raw: unknown;
-  surface?: McpServerSurface;
-  authState: McpAuthState;
-  server: McpServerConfig;
-};
-
 type RpcTransport = {
   initialize(): Promise<RpcClientInfo>;
   listTools(): Promise<McpToolDescriptor[]>;
@@ -136,10 +128,6 @@ type RpcTransport = {
   readResource(uri: string): Promise<unknown>;
   getPrompt(
     promptName: string,
-    args: Record<string, unknown>,
-  ): Promise<unknown>;
-  runCommand(
-    commandName: string,
     args: Record<string, unknown>,
   ): Promise<unknown>;
   close(): Promise<void>;
@@ -795,7 +783,9 @@ function pickJsonRpcResponseForId(
 ): JsonRecord | undefined {
   const entries = Array.isArray(payload) ? payload : [payload];
   for (const entry of entries) {
-    if (!isRecord(entry) || entry.id === undefined) {
+    // A message with a method is a server request, never our response, even
+    // when its id happens to equal the id of our call.
+    if (!isRecord(entry) || entry.id === undefined || entry.method !== undefined) {
       continue;
     }
     if (String(entry.id) === requestId) {
@@ -1098,17 +1088,6 @@ class HttpRpcTransport implements RpcTransport {
     });
   }
 
-  async runCommand(
-    commandName: string,
-    args: Record<string, unknown>,
-  ): Promise<unknown> {
-    await this.initialize();
-    return await this.send('commands/call', {
-      name: commandName,
-      arguments: args,
-    });
-  }
-
   async close(): Promise<void> {
     this.initialized = false;
   }
@@ -1294,12 +1273,12 @@ class SseRpcTransport implements RpcTransport {
 
       if (
         typeof entry.method === 'string' &&
-        (typeof entry.id === 'string' || typeof entry.id === 'number') &&
-        !this.pending.has(String(entry.id))
+        (typeof entry.id === 'string' || typeof entry.id === 'number')
       ) {
-        // A server-initiated request (sampling/createMessage,
+        // A server-initiated request (ping, sampling/createMessage,
         // elicitation/create, ...) arriving on the SSE stream: route it and
-        // POST the JSON-RPC reply to the message endpoint.
+        // POST the JSON-RPC reply to the message endpoint. A message with a
+        // method is always a request, even when its id equals one of ours.
         // (Previously these were silently dropped.)
         void this.respondToServerRequest(entry.id, entry.method, entry.params);
         continue;
@@ -1743,17 +1722,6 @@ class SseRpcTransport implements RpcTransport {
     });
   }
 
-  async runCommand(
-    commandName: string,
-    args: Record<string, unknown>,
-  ): Promise<unknown> {
-    await this.initialize();
-    return await this.send('commands/call', {
-      name: commandName,
-      arguments: args,
-    });
-  }
-
   async close(): Promise<void> {
     this.closing = true;
     if (this.reconnectTimer) {
@@ -2126,12 +2094,12 @@ class StdioRpcTransport implements RpcTransport {
 
       if (
         typeof payload.method === 'string' &&
-        (typeof payload.id === 'string' || typeof payload.id === 'number') &&
-        (typeof payload.id !== 'number' || !this.pending.has(payload.id))
+        (typeof payload.id === 'string' || typeof payload.id === 'number')
       ) {
-        // A server-initiated request (sampling/createMessage,
-        // elicitation/create, ...): it has a method and an id, but matches
-        // none of our in-flight calls. Route it and reply on the pipe.
+        // A server-initiated request (ping, sampling/createMessage,
+        // elicitation/create, ...): it has a method and an id. It is a
+        // request even when its id equals one of our in-flight calls (ids are
+        // per direction). Route it and reply on the pipe.
         // (Previously these were silently dropped.)
         void this.handleServerRequest(payload.id, payload.method, payload.params);
         continue;
@@ -2316,17 +2284,6 @@ class StdioRpcTransport implements RpcTransport {
     await this.initialize();
     return await this.send('prompts/get', {
       name: promptName,
-      arguments: args,
-    });
-  }
-
-  async runCommand(
-    commandName: string,
-    args: Record<string, unknown>,
-  ): Promise<unknown> {
-    await this.initialize();
-    return await this.send('commands/call', {
-      name: commandName,
       arguments: args,
     });
   }
@@ -2725,64 +2682,6 @@ export async function callMcpServerTool(options: ManagedRequestOptions & {
         request,
         `MCP tool ${request.toolName}`,
         (client) => client.callTool(request.toolName, request.args ?? {}),
-      );
-      return {
-        output: serializeResult(result),
-        raw: result,
-        surface: surface.surface,
-        authState: surface.authState,
-        server: surface.server,
-      };
-    } catch (error) {
-      await invalidateManagedClient(request.server, request.cwd);
-      if (error instanceof McpCallCancelledError) {
-        throw error;
-      }
-      if (!retriedSession && isMcpSessionExpiryError(error)) {
-        retriedSession = true;
-        continue;
-      }
-      if (!retriedCredential && isMcpAuthRejection(error)) {
-        retriedCredential = true;
-        const fresh = await reloadRotatedCredential(request.server, request.cwd);
-        if (fresh) {
-          request = { ...request, server: fresh };
-          continue;
-        }
-      }
-      // Detect missing runtime/executable — do not retry, surface to user
-      if (isMissingExecutableError(error)) {
-        const req = detectDependencyRequirement(request.server);
-        if (req) {
-          throw new McpDependencyError(
-            request.server,
-            buildDependencyInfo(request.server, req),
-          );
-        }
-      }
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        isMcpAuthRejection(error)
-          ? `${message}\nMCP server ${request.server.id} refused the credential. If the owner connected this service in an app, it may need to be reconnected there.`
-          : message,
-      );
-    }
-  }
-}
-
-export async function runMcpServerCommand(options: ManagedRequestOptions & {
-  commandName: string;
-  args?: Record<string, unknown>;
-}): Promise<McpCommandRunResult> {
-  let request = options;
-  let retriedSession = false;
-  let retriedCredential = false;
-  for (;;) {
-    try {
-      const { result, surface } = await requestWithManagedClient(
-        request,
-        `MCP command ${request.commandName}`,
-        (client) => client.runCommand(request.commandName, request.args ?? {}),
       );
       return {
         output: serializeResult(result),

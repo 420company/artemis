@@ -56,6 +56,7 @@ import {
   validateNotebookAddTagAction,
   validateNotebookRemoveTagAction,
   validateNotebookTreeAction,
+  isExtraActionType,
 } from './extras-validators.js';
 import {
   ALL_AGENT_ACTION_TYPES,
@@ -77,9 +78,6 @@ import { executeGenerateVideo } from './generateVideo.js';
 import { executeSynthesizeSpeech } from './synthesizeSpeech.js';
 import { executeTranscribeAudio } from './transcribeAudio.js';
 import { executePlaceCall, PLACE_CALL_DESCRIPTION } from './phoneCall/placeCall.js';
-import { GET_BALANCE_DESCRIPTION } from './wallet/getBalance.js';
-import { SWAP_QUOTE_DESCRIPTION } from './wallet/swapQuote.js';
-import { SEND_TRANSACTION_DESCRIPTION } from './wallet/sendTransaction.js';
 import { executeOfficeDocument } from './officeDocuments.js';
 import { CREATE_DOCUMENT_DESCRIPTION, CREATE_PRESENTATION_DESCRIPTION, CREATE_SPREADSHEET_DESCRIPTION, validateOfficeAction } from './office/descriptions.js';
 import { executeInsertInFile } from './insertInFile.js';
@@ -95,8 +93,6 @@ import {
 } from './taskManager.js';
 import { executeSearchFiles } from './searchFiles.js';
 import { executeSearchWeb } from './searchWeb.js';
-import { executeHttpRequest } from './httpRequest.js';
-import { executeWebScraper } from './webScraper.js';
 import { executeWriteFile } from './writeFile.js';
 import { executeBridgeSendImage } from './bridgeSendImage.js';
 import { executeBridgeSendVideo } from './bridgeSendVideo.js';
@@ -107,7 +103,6 @@ import { executeAgentIdentity, validateAgentIdentityAction } from './agentIdenti
 import { executeUseWorkflow, USE_WORKFLOW_DESCRIPTION } from './useWorkflow.js';
 import { isToolSupportedOnHost } from './platformSupport.js';
 import { createLoadToolsToolDef, LOAD_TOOLS_TYPE } from './toolLoader.js';
-import { normalizeChain, normalizeAddress, normalizeToken, normalizeAmount, normalizeQuoteId } from './wallet/walletConfig.js';
 
 export type { ToolDefinition };
 
@@ -399,20 +394,6 @@ function validateMcpGetPromptAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.serverId, 'serverId', errors);
   validateRequiredNonEmptyString(action?.promptName, 'promptName', errors);
-  validatePositiveInteger(action?.timeoutMs, 'timeoutMs', errors);
-  if (
-    action?.args !== undefined &&
-    (!action.args || typeof action.args !== 'object' || Array.isArray(action.args))
-  ) {
-    errors.push('args must be a JSON object.');
-  }
-  return errors;
-}
-
-function validateMcpRunCommandAction(action: any): string[] {
-  const errors: string[] = [];
-  validateRequiredNonEmptyString(action?.serverId, 'serverId', errors);
-  validateRequiredNonEmptyString(action?.commandName, 'commandName', errors);
   validatePositiveInteger(action?.timeoutMs, 'timeoutMs', errors);
   if (
     action?.args !== undefined &&
@@ -782,180 +763,6 @@ function validatePlaceCallAction(action: any): string[] {
   return errors;
 }
 
-function validateGetBalanceAction(action: any): string[] {
-  const errors: string[] = [];
-
-  // Runs a normalizer and collects a specific error.
-  // Throws, null, undefined, empty strings, and { ok: false } results are all treated as invalid.
-  const check = (fn: unknown, value: unknown, field: string, ...extra: unknown[]): unknown => {
-    if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
-      errors.push(`${field} is required`);
-      return undefined;
-    }
-    const describe = (v: unknown): string => {
-      try {
-        const s = typeof v === 'string' ? v : JSON.stringify(v);
-        return s === undefined ? String(v) : s.length > 120 ? `${s.slice(0, 117)}...` : s;
-      } catch {
-        return String(v);
-      }
-    };
-    try {
-      const result = (fn as (...args: unknown[]) => unknown)(value, ...extra);
-      if (result === null || result === undefined || (typeof result === 'string' && result.trim() === '')) {
-        errors.push(`${field} is invalid: ${describe(value)}`);
-        return undefined;
-      }
-      if (typeof result === 'object' && (result as { ok?: unknown }).ok === false) {
-        const r = result as { error?: unknown; reason?: unknown; message?: unknown };
-        const detail = [r.error, r.reason, r.message].find((x) => typeof x === 'string' && x.length > 0);
-        errors.push(`${field} is invalid: ${typeof detail === 'string' ? detail : describe(value)}`);
-        return undefined;
-      }
-      return result;
-    } catch (err) {
-      const msg = err instanceof Error && err.message ? err.message : describe(value);
-      errors.push(`${field} is invalid: ${msg}`);
-      return undefined;
-    }
-  };
-
-  const chain = check(normalizeChain, action?.chain, 'chain');
-  if (chain !== undefined) {
-    check(normalizeAddress, action?.address, 'address', chain);
-  } else {
-    check(normalizeAddress, action?.address, 'address');
-  }
-
-  return errors;
-}
-
-function validateSwapQuoteAction(action: any): string[] {
-  const errors: string[] = [];
-
-  // Runs a normalizer and collects a specific error.
-  // Throws, null, undefined, empty strings, and { ok: false } results are all treated as invalid.
-  const check = (fn: unknown, value: unknown, field: string, ...extra: unknown[]): unknown => {
-    if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
-      errors.push(`${field} is required`);
-      return undefined;
-    }
-    const describe = (v: unknown): string => {
-      try {
-        const s = typeof v === 'string' ? v : JSON.stringify(v);
-        return s === undefined ? String(v) : s.length > 120 ? `${s.slice(0, 117)}...` : s;
-      } catch {
-        return String(v);
-      }
-    };
-    try {
-      const result = (fn as (...args: unknown[]) => unknown)(value, ...extra);
-      if (result === null || result === undefined || (typeof result === 'string' && result.trim() === '')) {
-        errors.push(`${field} is invalid: ${describe(value)}`);
-        return undefined;
-      }
-      if (typeof result === 'object' && (result as { ok?: unknown }).ok === false) {
-        const r = result as { error?: unknown; reason?: unknown; message?: unknown };
-        const detail = [r.error, r.reason, r.message].find((x) => typeof x === 'string' && x.length > 0);
-        errors.push(`${field} is invalid: ${typeof detail === 'string' ? detail : describe(value)}`);
-        return undefined;
-      }
-      return result;
-    } catch (err) {
-      const msg = err instanceof Error && err.message ? err.message : describe(value);
-      errors.push(`${field} is invalid: ${msg}`);
-      return undefined;
-    }
-  };
-
-  // Derives a comparable key from a normalized token (string or object form).
-  const tokenKey = (t: unknown): string => {
-    if (typeof t === 'string') return t.trim().toLowerCase();
-    if (t && typeof t === 'object') {
-      const o = t as { address?: unknown; symbol?: unknown; id?: unknown };
-      for (const k of [o.address, o.id, o.symbol]) {
-        if (typeof k === 'string' && k.trim() !== '') return k.trim().toLowerCase();
-      }
-      try {
-        return JSON.stringify(t);
-      } catch {
-        return String(t);
-      }
-    }
-    return String(t);
-  };
-
-  const chain = check(normalizeChain, action?.chain, 'chain');
-  const extra: unknown[] = chain !== undefined ? [chain] : [];
-  const from = check(normalizeToken, action?.from, 'from', ...extra);
-  const to = check(normalizeToken, action?.to, 'to', ...extra);
-  check(normalizeAmount, action?.amount, 'amount');
-
-  if (from !== undefined && to !== undefined && tokenKey(from) === tokenKey(to)) {
-    errors.push(`from and to must be different tokens: both resolve to ${tokenKey(from)}`);
-  }
-
-  return errors;
-}
-
-function validateSendTransactionAction(action: any): string[] {
-  const errors: string[] = [];
-
-  // Runs a normalizer and collects a specific error.
-  // Throws, null, undefined, empty strings, and { ok: false } results are all treated as invalid.
-  const check = (fn: unknown, value: unknown, field: string, ...extra: unknown[]): unknown => {
-    if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
-      errors.push(`${field} is required`);
-      return undefined;
-    }
-    const describe = (v: unknown): string => {
-      try {
-        const s = typeof v === 'string' ? v : JSON.stringify(v);
-        return s === undefined ? String(v) : s.length > 120 ? `${s.slice(0, 117)}...` : s;
-      } catch {
-        return String(v);
-      }
-    };
-    try {
-      const result = (fn as (...args: unknown[]) => unknown)(value, ...extra);
-      if (result === null || result === undefined || (typeof result === 'string' && result.trim() === '')) {
-        errors.push(`${field} is invalid: ${describe(value)}`);
-        return undefined;
-      }
-      if (typeof result === 'object' && (result as { ok?: unknown }).ok === false) {
-        const r = result as { error?: unknown; reason?: unknown; message?: unknown };
-        const detail = [r.error, r.reason, r.message].find((x) => typeof x === 'string' && x.length > 0);
-        errors.push(`${field} is invalid: ${typeof detail === 'string' ? detail : describe(value)}`);
-        return undefined;
-      }
-      return result;
-    } catch (err) {
-      const msg = err instanceof Error && err.message ? err.message : describe(value);
-      errors.push(`${field} is invalid: ${msg}`);
-      return undefined;
-    }
-  };
-
-  const chain = check(normalizeChain, action?.chain, 'chain');
-  const extra: unknown[] = chain !== undefined ? [chain] : [];
-  check(normalizeAddress, action?.to, 'to', ...extra);
-  check(normalizeToken, action?.token, 'token', ...extra);
-  check(normalizeAmount, action?.amount, 'amount');
-
-  // quoteId is optional: undefined is allowed; an explicit null or any invalid value is rejected.
-  if (action?.quoteId !== undefined) {
-    if (action.quoteId === null) {
-      errors.push('quoteId is invalid: null (omit the field instead of passing null)');
-    } else if (typeof action.quoteId !== 'string') {
-      errors.push(`quoteId is invalid: must be a string, got ${typeof action.quoteId}`);
-    } else {
-      check(normalizeQuoteId, action.quoteId, 'quoteId');
-    }
-  }
-
-  return errors;
-}
-
 function validateTranscribeAudioAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.inputPath, 'inputPath', errors);
@@ -1117,15 +924,6 @@ const actionToolDefs: ToolDefinition[] = [
     validate: validateMcpGetPromptAction,
   },
   {
-    type: 'mcp_run_command',
-    description: '运行 MCP 服务器暴露的命令',
-    kind: 'mcp',
-    permissionCategory: 'execute',
-    executionMode: 'non-blocking',
-    parallelSafe: true,
-    validate: validateMcpRunCommandAction,
-  },
-  {
     type: 'write_file',
     description: '写入文件内容',
     kind: 'write',
@@ -1258,7 +1056,7 @@ const actionToolDefs: ToolDefinition[] = [
   },
   {
     type: 'get_sms_number',
-    description: '需要手机号接收验证码时，申请一个临时虚拟号码（会产生费用，必须主人批准；审批卡片显示平台计费）。很多网站不接受虚拟号码，被拒时改用 ask_owner_for_code。',
+    description: '需要手机号接收验证码时，申请一个临时虚拟号码（每次都必须主人批准）。很多网站不接受虚拟号码，被拒时改用 ask_owner_for_code。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
@@ -1430,45 +1228,6 @@ const actionToolDefs: ToolDefinition[] = [
     execute: ((action: any, context: any) => executePlaceCall(action, context)) as any,
   },
   {
-    type: 'get_balance',
-    description: GET_BALANCE_DESCRIPTION,
-    kind: 'code',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateGetBalanceAction,
-    execute: (async (action: any, context: any) => {
-      const { executeGetBalance } = await import('./wallet/getBalance.js');
-      return executeGetBalance(action, context);
-    }) as any,
-  },
-  {
-    type: 'swap_quote',
-    description: SWAP_QUOTE_DESCRIPTION,
-    kind: 'code',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateSwapQuoteAction,
-    execute: (async (action: any, context: any) => {
-      const { executeSwapQuote } = await import('./wallet/swapQuote.js');
-      return executeSwapQuote(action, context);
-    }) as any,
-  },
-  {
-    type: 'send_transaction',
-    description: SEND_TRANSACTION_DESCRIPTION,
-    kind: 'code',
-    permissionCategory: 'execute',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateSendTransactionAction,
-    execute: (async (action: any, context: any) => {
-      const { executeSendTransaction } = await import('./wallet/sendTransaction.js');
-      return executeSendTransaction(action, context);
-    }) as any,
-  },
-  {
     type: 'create_presentation',
     description: CREATE_PRESENTATION_DESCRIPTION,
     kind: 'write',
@@ -1614,7 +1373,7 @@ const actionToolDefs: ToolDefinition[] = [
     type: 'git_add',
     description: 'Stage files for commit.',
     kind: 'write',
-    permissionCategory: 'write',
+    permissionCategory: 'execute',
     executionMode: 'blocking',
     parallelSafe: false,
     validate: validateGitAddAction,
@@ -1624,7 +1383,7 @@ const actionToolDefs: ToolDefinition[] = [
     type: 'git_commit',
     description: 'Create a git commit with a message.',
     kind: 'write',
-    permissionCategory: 'write',
+    permissionCategory: 'execute',
     executionMode: 'blocking',
     parallelSafe: false,
     validate: validateGitCommitAction,
@@ -1635,7 +1394,7 @@ const actionToolDefs: ToolDefinition[] = [
     type: 'git_branch',
     description: 'List branches, create a new branch, or checkout a branch.',
     kind: 'write',
-    permissionCategory: 'write',
+    permissionCategory: 'execute',
     executionMode: 'blocking',
     parallelSafe: false,
     validate: validateGitBranchAction,
@@ -1756,7 +1515,7 @@ const actionToolDefs: ToolDefinition[] = [
   // System
   {
     type: 'get_env',
-    description: 'Read environment variable(s). Filters out secrets automatically.',
+    description: 'Read environment variables by name (key or keys), or list up to 50 when no name is given. Variables whose names look like secrets (token, key, password, secret, credential, auth, cookie, session, PAT …) or whose values are URLs with a login (scheme://user:pass@host) are never returned, not even by name.',
     kind: 'code',
     permissionCategory: 'read',
     executionMode: 'blocking',
@@ -1851,7 +1610,7 @@ const actionToolDefs: ToolDefinition[] = [
     type: 'npm_run',
     description: 'Run an npm script from package.json (e.g. test, build, lint).',
     kind: 'write',
-    permissionCategory: 'write',
+    permissionCategory: 'execute',
     executionMode: 'blocking',
     parallelSafe: false,
     validate: validateNpmRunAction,
@@ -1861,7 +1620,7 @@ const actionToolDefs: ToolDefinition[] = [
     type: 'format_code',
     description: 'Auto-format a code file using the appropriate formatter (prettier, gofmt, black, rustfmt).',
     kind: 'write',
-    permissionCategory: 'write',
+    permissionCategory: 'execute',
     executionMode: 'blocking',
     parallelSafe: false,
     validate: validateFormatCodeAction,
@@ -2001,43 +1760,16 @@ const actionToolDefs: ToolDefinition[] = [
 ];
 
 const capabilityToolDefs: ToolDefinition[] = [
-    {
-    type: 'http_request',
-    description: '发送 HTTP(S) 请求并返回响应。仅 GET/POST/HEAD；内置 SSRF 防护（DNS 预检 + 连接时 pin 预检 IP，防 DNS 重绑定；拦截内网/保留地址，含 ::ffff: 映射形）；最多 5 次重定向（每跳重验）；默认 30 秒超时 + 10 秒无数据看门狗；5MB 响应上限。Authorization 须经 authHeader 字段显式传入。',
-    kind: 'code',
-    permissionCategory: 'execute',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: (action: any) => {
-      const errors: string[] = [];
-      validateRequiredNonEmptyString(action?.url, 'url', errors);
-      validateEnumString(action?.method, 'method',
-        ['GET', 'POST', 'HEAD'] as const, errors);
-      validatePositiveInteger(action?.timeoutMs, 'timeoutMs', errors);
-      return errors;
-    },
-    execute: executeHttpRequest as any,
-  },
-  {
-    type: 'web_scraper',
-    description: '从指定 URL 抓取网页并提取可读正文（自动去除 script/style/导航等噪音）。底层复用 http_request 的安全 fetch 管道。非 HTML 内容返回原文前 100k 字符。',
-    kind: 'code',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: (action: any) => {
-      const errors: string[] = [];
-      validateRequiredNonEmptyString(action?.url, 'url', errors);
-      validatePositiveInteger(action?.timeoutMs, 'timeoutMs', errors);
-      validatePositiveInteger(action?.maxChars, 'maxChars', errors);
-      return errors;
-    },
-    execute: executeWebScraper as any,
-  },
-  // NOTE: 5 stub tools (`search`, `user_interaction`, `confirm`, `mcp`,
-  // `notebook_worktree`) remain removed — each has a working replacement
-  // (`search_web`, `request_user_confirmation`, `mcp_call_tool`, newer
-  // notebook tools). The /mcp slash command lives in interactive.ts.
+  // NOTE: removed 7 stub tools (`http_request`, `search`, `web_scraper`,
+  // `user_interaction`, `confirm`, `mcp`, `notebook_worktree`) that were
+  // declared with executionMode='blocking' but had no `execute` function.
+  // The /mcp slash command lives in interactive.ts. The agent's `todo` tool
+  // (below) keeps the plan on the conversation's task board (core/todoList.ts);
+  // the older TodoTool class in src/tools/TodoTool/ is not wired.
+  // declared with executionMode='blocking' but had no `execute` function.
+  // The /mcp slash command lives in interactive.ts. The agent's `todo` tool
+  // (above) keeps the plan on the conversation's task board (core/todoList.ts);
+  // the older TodoTool class in src/tools/TodoTool/ is not wired.
 
   // ── Spotify integration ────────────────────────────────────────────────
   // brain-callable tools that drive Spotify Web API. Authentication via
@@ -2941,16 +2673,18 @@ const capabilityToolDefs: ToolDefinition[] = [
   },
   {
     type: 'edit_timeline',
-    description: '视频时间线编辑器：管理 timeline-projects 下的时间线项目。list_segments 列出段落；replace_segment 替换段落视频；trim_segment 裁剪段落（ffmpeg）；add_subtitle/remove_subtitle 加/删字幕；set_bgm 设置背景音乐；render 渲染成片（拼接+字幕+混音）；import_saga 从 Saga 长视频输出导入为可编辑时间线。',
+    description: '视频时间线编辑器：管理时间线项目。list_segments 列出段落；replace_segment 替换段落视频；trim_segment 裁剪段落；add_subtitle/remove_subtitle 加/删字幕；set_bgm 设置背景音乐；render 渲染成片（拼接+字幕+混音）；import_long_video 把一个已生成的长视频项目（projectId）导入为可编辑时间线。替换视频和背景音乐只能使用工作区或媒体输出目录里的文件。',
     kind: 'code',
     permissionCategory: 'execute',
     executionMode: 'blocking',
     parallelSafe: false,
     validate: (a: any) => {
       const errs: string[] = [];
-      const validActions = ['list_segments', 'replace_segment', 'trim_segment', 'add_subtitle', 'remove_subtitle', 'set_bgm', 'render', 'import_saga'];
-      if (!validActions.includes(a?.action)) errs.push(`action must be one of: ${validActions.join(', ')}. `);
-      if (a?.action !== 'import_saga' && !isNonEmptyString(a?.projectId)) errs.push('projectId is required.');
+      const validActions = ['list_segments', 'replace_segment', 'trim_segment', 'add_subtitle', 'remove_subtitle', 'set_bgm', 'render', 'import_long_video'];
+      // import_saga / sagaProjectId: hidden aliases of import_long_video / projectId for older calls.
+      const legacyImport = a?.action === 'import_saga' && isNonEmptyString(a?.sagaProjectId);
+      if (!validActions.includes(a?.action) && a?.action !== 'import_saga') errs.push(`action must be one of: ${validActions.join(', ')}. `);
+      if (!legacyImport && !isNonEmptyString(a?.projectId)) errs.push('projectId is required.');
       return errs;
     },
     execute: (async (a: any, context: any) => {
@@ -2987,8 +2721,8 @@ export type ToolLoadTier = 'core' | 'ondemand';
 
 /**
  * Tools always rendered in full in the manifest. Everything else is
- * 'ondemand' and (once phase 2 switches the system prompt to core-only)
- * is listed by name + one-line summary, fetched via `load_tools`.
+ * 'ondemand'; only with the lazy-loading opt-in (ARTEMIS_LAZY_TOOLS=1) is it
+ * listed by name + one-line summary and fetched via `load_tools`.
  */
 export const CORE_TOOL_TYPES: ReadonlySet<string> = new Set<string>([
   // File basics
@@ -3021,7 +2755,6 @@ export const CORE_TOOL_TYPES: ReadonlySet<string> = new Set<string>([
   'view_image',
   // MCP basics
   'mcp_call_tool',
-  'mcp_run_command',
 ]);
 
 const ON_DEMAND_SUMMARY_MAX_CHARS = 120;
@@ -3107,14 +2840,19 @@ export function getCoreToolTypesForProfile(profile: string): ReadonlySet<string>
   return READONLY_CORE_TOOL_TYPES;
 }
 
+/** Explicit opt-in for the (not yet end-to-end) lazy tool loading. */
+export const LAZY_TOOLS_ENV = 'ARTEMIS_LAZY_TOOLS';
+
 /**
- * WP-18 phase 2: resolve the manifest tier.
+ * Resolve the manifest tier.
  *
- * Default is 'core' (core-only mode). Set ARTEMIS_ALL_TOOLS=1 to fall back
- * to the legacy 'all' mode (every tool rendered in full) for debugging.
+ * Default is 'all': every tool the profile may call is rendered in full.
+ * Lazy loading (core tools in full, the rest by name, fetched with
+ * `load_tools`) stays dormant until it works end to end; it is used only
+ * when ARTEMIS_LAZY_TOOLS=1 is set explicitly.
  */
 export function resolveToolManifestTier(): 'core' | 'all' {
-  return process.env.ARTEMIS_ALL_TOOLS === '1' ? 'all' : 'core';
+  return process.env[LAZY_TOOLS_ENV] === '1' ? 'core' : 'all';
 }
 
 /** First sentence of a description, whitespace-collapsed, truncated to 120 chars. */
@@ -3133,18 +2871,22 @@ function toAllowedTypeSet(allowedToolTypes?: Iterable<string> | null): ReadonlyS
 
 /**
  * On-demand tools that would appear in the model manifest, as type + one-line summary.
- * Optional `allowedToolTypes` restricts the result to a profile's allowed set.
+ * Optional `allowedToolTypes` restricts the result to a profile's allowed set;
+ * `profile` picks the core set (getCoreToolTypesForProfile) that is left out
+ * because it is already rendered in full.
  */
 export function getOnDemandToolSummaries(
   allowedToolTypes?: Iterable<string> | null,
+  profile = 'main',
 ): Array<{ type: string; description: string }> {
   const allowed = toAllowedTypeSet(allowedToolTypes);
+  const profileCore = getCoreToolTypesForProfile(profile);
   const seen = new Set<string>();
   const summaries: Array<{ type: string; description: string }> = [];
   for (const def of toolDefs) {
     if (seen.has(def.type)) continue;
     seen.add(def.type);
-    if (isCoreTool(def.type)) continue;
+    if (profileCore.has(def.type)) continue;
     if (!isListedInModelManifest(def)) continue;
     if (allowed && !allowed.has(def.type)) continue;
     summaries.push({ type: def.type, description: summarizeToolDescription(def.description) });
@@ -3199,6 +2941,14 @@ export function isToolAvailableForProvider(toolType: string): boolean {
   }
 
   if (PROVIDER_EXCLUDED_ACTION_TYPES.has(toolType as AgentActionType)) {
+    return false;
+  }
+
+  // The extras (file ops, git, text, network and dev helpers) run on the
+  // interactive direct-tool path (brain.ts), which validates them and asks
+  // for approvals. No agent profile offers them, so they are not provider
+  // tools of the agent loop either.
+  if (isExtraActionType(toolType)) {
     return false;
   }
 
@@ -3292,8 +3042,8 @@ export function renderDetailedToolManifest(
 export interface RenderToolManifestOptions {
   /**
    * 'core' (default) renders core tools in full + on-demand summaries.
-   * 'all' keeps legacy behavior (every tool in full). When unset, resolved
-   * via resolveToolManifestTier() (ARTEMIS_ALL_TOOLS=1 forces 'all').
+   * 'all' renders every tool in full. When unset, resolved via
+   * resolveToolManifestTier() ('all' unless ARTEMIS_LAZY_TOOLS=1).
    */
   loadTier?: 'core' | 'all';
   /** Execution profile for profile-specific core filtering. Defaults to 'main'. */
@@ -3318,11 +3068,12 @@ export function renderToolManifest(
 
   const coreManifest = renderDetailedToolManifest(coreTypes);
 
-  // Without load_tools available, an on-demand list would be unusable noise.
+  // Without load_tools the model could never reach an on-demand tool, so the
+  // full manifest is the only safe one.
   const loaderAvailable = !allowed || allowed.has(LOAD_TOOLS_TYPE);
-  if (!loaderAvailable) return coreManifest;
+  if (!loaderAvailable) return renderDetailedToolManifest(allowedToolTypes);
 
-  const onDemand = getOnDemandToolSummaries(allowed);
+  const onDemand = getOnDemandToolSummaries(allowed, options.profile ?? 'main');
   if (onDemand.length === 0) return coreManifest;
 
   const onDemandLines = onDemand.map((tool) => `- ${tool.type}: ${tool.description}`);

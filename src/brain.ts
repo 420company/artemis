@@ -56,6 +56,7 @@ import {
 } from './core/backgroundTasks.js';
 import { resolveExtensionRuntime } from './extensions/runtime.js';
 import { EXTRA_TOOL_NAMES, executeExtraTool } from './tools/extras.js';
+import { validateExtraAction } from './tools/extras-validators.js';
 import { ApprovalRuntime, classifyDirectToolNeed, loadApprovalPolicy, type ApprovalKind } from './security/approvals.js';
 import { describeDangerousCommand } from './tools/runCommand.js';
 import { normalizeUiLocale } from './cli/locale.js';
@@ -361,7 +362,6 @@ const SETUP_TOOL_NAME_GROUPS: Record<string, readonly string[]> = {
     web: [
         'search_web',
         'deep_research',
-        'http_request',
         'check_url',
         'download_file',
         'dns_lookup',
@@ -1561,13 +1561,21 @@ async function executeToolInner(name: any, input: any, opts: any) {
     }
     // ── Extra tools (file ops, git, text, crypto, network, dev) ──────────────
     if (EXTRA_TOOL_NAMES.has(name)) {
+        // The same parameter checks the agent path runs (extras-validators):
+        // nothing reaches executeExtraTool with arguments that fail them.
+        const validationErrors = validateExtraAction({ type: name, ...argsRecord } as AgentAction);
+        if (validationErrors.length > 0)
+            return buildDirectToolValidationFailure(name, validationErrors);
         // Determine permission category for gate.
-        // Shell tools execute user-controlled subprocess (hooks, npm scripts,
-        // formatter plugins) — they must NOT bypass shell gates in WRITER mode.
-        const shellTools = new Set(['git_commit', 'npm_run', 'format_code']);
+        // Shell tools start a subprocess that runs user-controlled code (git
+        // hooks, npm scripts, formatter plugins) or changes the repository —
+        // they must NOT bypass shell gates in WRITER mode, and they go through
+        // the approval classifier like run_command (classifyDirectToolNeed).
+        const shellTools = new Set(['git_add', 'git_commit', 'npm_run', 'format_code']);
         const writeTools = new Set(['delete_file', 'move_file', 'copy_file', 'create_directory',
-            'delete_directory', 'git_add', 'download_file']);
-        const cat = shellTools.has(name) ? 'shell' : writeTools.has(name) ? 'write' : 'read';
+            'delete_directory', 'download_file']);
+        const switchesBranch = name === 'git_branch' && (argsRecord.create !== undefined || argsRecord.checkout !== undefined);
+        const cat = shellTools.has(name) || switchesBranch ? 'shell' : writeTools.has(name) ? 'write' : 'read';
         const denied = await checkPermission(name, cat, permissionMode, onPermissionRequest, argsRecord);
         if (denied)
             return buildDirectToolFailure('tool_permission_denied', denied, {
@@ -1588,40 +1596,6 @@ async function executeToolInner(name: any, input: any, opts: any) {
             name,
             await executeExtraTool(name, input, workspace.cwd, mapPermissionModeForToolContext(permissionMode)),
         );
-    }
-    // ── http_request is handled inline (not in TOOL_REGISTRY) ────────────────
-    if (name === 'http_request') {
-        const inp = input;
-        const url = typeof inp.url === 'string' ? inp.url : '';
-        const method = typeof inp.method === 'string' ? inp.method.toUpperCase() : 'GET';
-        const body = typeof inp.body === 'string' ? inp.body : undefined;
-        const hdrs = inp.headers ?? {};
-        if (!url)
-            return buildDirectToolValidationFailure(name, ['url is required.']);
-        // Permission gate for non-GET
-        if (method !== 'GET' && method !== 'HEAD') {
-            const cat = 'write';
-            const denied = await checkPermission(name, cat, permissionMode, onPermissionRequest, argsRecord);
-            if (denied)
-                return buildDirectToolFailure('tool_permission_denied', denied, {
-                    retryable: false,
-                });
-        }
-        try {
-            const resp = await fetch(url, { method, body, headers: hdrs });
-            const text = await resp.text();
-            const preview = text.slice(0, 50_000);
-            return {
-                ok: resp.ok,
-                output: `HTTP ${resp.status} ${resp.statusText}\n${preview}${text.length > 50_000 ? '\n[truncated]' : ''}`,
-            };
-        }
-        catch (e) {
-            const message = `http_request error: ${String(e)}`;
-            return buildDirectToolFailure('tool_execution_failed', message, {
-                retryable: false,
-            });
-        }
     }
     const tool = getToolDefinition(name);
     if (!tool)
@@ -2281,14 +2255,12 @@ const NEW_PATH_UNSUPPORTED_OPTIONS = [
 
 /**
  * Returns whether the runAgent-backed think() path is enabled.
- * ARTEMIS_BRAIN_NEW=0 forces legacy (escape hatch). ARTEMIS_BRAIN_LEGACY=1
- * also forces legacy (kept for backward compatibility). Otherwise the new
- * path is the default — no env var needed.
+ * ARTEMIS_BRAIN_LEGACY=1 always wins. Otherwise the new path requires an explicit
+ * ARTEMIS_BRAIN_NEW=1. The default is legacy.
  */
 function isBrainNewPathEnabled(): boolean {
-    if (process.env.ARTEMIS_BRAIN_NEW === '0') return false;
     if (process.env.ARTEMIS_BRAIN_LEGACY === '1') return false;
-    return true;
+    return process.env.ARTEMIS_BRAIN_NEW === '1';
 }
 
 /**
@@ -2382,23 +2354,30 @@ async function thinkOptionsToRunAgentOptions(
     if (options.selfCheck !== undefined) {
         runOptions.selfCheck = options.selfCheck;
     }
-    // onToolCall/onToolResult are assumed to exist on RunAgentOptions. Object.assign
-    // keeps this compiling even if the declared shape differs.
-    const toolHooks: { onToolCall?: (name: any, args: any) => void; onToolResult?: (name: any, ok: any, output: any) => void } = {};
-    if (options.onToolCall) toolHooks.onToolCall = options.onToolCall;
-    if (options.onToolResult) toolHooks.onToolResult = options.onToolResult;
-    Object.assign(runOptions, toolHooks);
+    // A stop from the caller stops the run.
+    if (options.abortSignal) runOptions.abortSignal = options.abortSignal;
+    // runAgent reports tools through onInfo: the `[tool:<name>] …` lines go to
+    // the caller's tool log (as the legacy path's tool lines do), and the
+    // start/end events to onToolCall/onToolResult.
+    runOptions.onInfo = (message, event) => {
+        try {
+            if (message.startsWith('[tool:')) options.onToolLog?.(message, event?.type === 'tool_end' && event.status !== 'ok' ? 'warn' : 'info');
+            if (event?.type === 'tool_start') options.onToolCall?.(event.tool, event.detail ? { detail: event.detail } : {});
+            if (event?.type === 'tool_end') options.onToolResult?.(event.tool, event.status === 'ok', event.summary ?? '');
+        } catch {
+            // A listener error must not break the turn.
+        }
+    };
 
     // getSession(cwd) is this module's singleton (cwd is only used on first creation).
     // Legacy thinkTurn uses the same singleton, so the seeded history matches.
     const seed: any[] = [...getSession(effectiveCwd).getMessages()];
-    // Assumption: id and messages are the only fields runAgent relies on here. Any
-    // other required SessionRecord fields are unknown at this layer, hence the
-    // targeted assertion.
-    const sessionRecord = {
-        id: `brain-adapter-${Date.now()}`,
+    // A complete session record (runAgent reads cwd, plan, tasks and the
+    // other lists), seeded with the legacy history; it is not saved as such.
+    const sessionRecord: AdapterSessionRecord = {
+        ...sessionStore.createSession({ title: 'think' }),
         messages: seed,
-    } as unknown as AdapterSessionRecord;
+    };
 
     return { runOptions, sessionRecord, permissionManager };
 }
@@ -2529,9 +2508,8 @@ async function withCwdThinkLock<T>(cwd: string, fn: () => Promise<T>): Promise<T
 
 /**
  * Public think() entry point and thin adapter.
- * Routes to runAgent by default when the options pass the capability
- * gate. ARTEMIS_BRAIN_NEW=0 (or ARTEMIS_BRAIN_LEGACY=1) forces the legacy
- * path. Otherwise it delegates to thinkTurnLegacy with the original arguments.
+ * Routes to runAgent when ARTEMIS_BRAIN_NEW=1 and the options pass the capability
+ * gate. Otherwise it delegates to thinkTurnLegacy with the original arguments.
  */
 export async function think(
     input: string,

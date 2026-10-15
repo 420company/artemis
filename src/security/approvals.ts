@@ -710,17 +710,16 @@ function need(kind: ApprovalKind, risk: ApprovalRisk, details: Record<string, st
 }
 
 /** An external (MCP) tool call: classified by what its name says it does, and asked unless it is known to only read. */
-export function classifyMcpCall(action: Extract<AgentAction, { type: 'mcp_call_tool' | 'mcp_run_command' }>): ApprovalNeed | null {
-  const name = action.type === 'mcp_run_command' ? action.commandName : action.toolName
-  const words = toolWords(name)
+export function classifyMcpCall(action: Extract<AgentAction, { type: 'mcp_call_tool' }>): ApprovalNeed | null {
+  const words = toolWords(action.toolName)
   const has = (set: Set<string>) => words.some((w) => set.has(w))
   const args = action.args ?? {}
-  const toolKey = `${action.serverId}/${name}`
+  const toolKey = `${action.serverId}/${action.toolName}`
   const base = {
     service: action.serverId,
     action: words.join(' '),
     // A name written with look-alike or invisible characters: the owner sees it as it really is.
-    ...(foldToolName(name) !== name || /[^\x20-\x7E]/.test(name) ? { tool: visibleName(name) } : {}),
+    ...(foldToolName(action.toolName) !== action.toolName || /[^\x20-\x7E]/.test(action.toolName) ? { tool: visibleName(action.toolName) } : {}),
     // Everything the call carries, exactly (sorted keys): what the owner approves.
     args: canonicalJson(args),
   }
@@ -749,8 +748,7 @@ export function classifyMcpCall(action: Extract<AgentAction, { type: 'mcp_call_t
   }
   if (has(DESTRUCTIVE_WORDS)) return need('external_action', 'high', base, { toolKey })
   // Known to only read (the server's own annotation, never the model's word).
-  // Commands have no read-only annotation, so no carve-out here.
-  if (action.type === 'mcp_call_tool' && action.readOnly === true) return null
+  if (action.readOnly === true) return null
   return need('external_action', 'medium', base, { toolKey })
 }
 
@@ -795,7 +793,6 @@ export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext):
       return need('outbound_send', 'medium', { to: PLATFORM_NAMES[platform] || undefined, file, content: action.caption, target: action.targetId })
     }
     case 'mcp_call_tool':
-    case 'mcp_run_command':
       return classifyMcpCall(action)
     // Office files and synthesized speech are written where the agent says:
     // inside the workspace (or the temp dir) that needs nothing; anywhere
@@ -829,6 +826,58 @@ export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext):
       }
       return need('shell_high_risk', 'medium', { command, target: host, reason: 'runs a command as root on the server', reasonZh: '会以管理员身份在服务器上运行一条命令' })
     }
+    // Extras that start a program which runs the workspace's own code (npm
+    // scripts, git hooks, formatter plugins and configs): a high-risk command
+    // every time, so a hosted run always asks the owner first.
+    case 'npm_run':
+      return need('shell_high_risk', 'high', {
+        command: `npm run ${action.script ?? 'test'}`,
+        reason: 'runs an npm script from the workspace',
+        reasonZh: '会运行工作区里的 npm 脚本',
+      })
+    case 'git_commit':
+      return need('shell_high_risk', 'high', {
+        command: `git commit -m ${JSON.stringify(action.message ?? '')}`,
+        reason: 'creates a git commit, which runs the repository\'s hooks',
+        reasonZh: '会创建 git 提交，并运行仓库里的 hook',
+      })
+    case 'format_code':
+      return need('shell_high_risk', 'high', {
+        command: `format ${action.path ?? ''}`,
+        reason: 'runs a code formatter, which loads the workspace\'s plugins and rewrites files',
+        reasonZh: '会运行代码格式化程序，它会加载工作区的插件并改写文件',
+      })
+    // The other git writes go through the same check as the equivalent shell command.
+    case 'git_add':
+    case 'git_branch': {
+      const command = action.type === 'git_add'
+        ? `git add -- ${(Array.isArray(action.paths) ? action.paths : [action.paths ?? '.']).join(' ')}`
+        : action.create !== undefined
+          ? `git checkout -b ${action.create}`
+          : action.checkout !== undefined
+            ? `git checkout ${action.checkout}`
+            : ''
+      const dangerous = command ? ctx.dangerousCommand?.(command) ?? null : null
+      return dangerous ? need('shell_high_risk', 'high', { command, reason: dangerous.reason, reasonZh: dangerous.reasonZh }) : null
+    }
+    // File extras that delete or overwrite: outside the workspace (and the
+    // temp dir) they need the owner, on the agent path and the direct path alike.
+    case 'delete_file':
+    case 'delete_directory': {
+      const target = outsideTarget(ctx, action.path)
+      return target ? need('delete_outside_workspace', 'high', { paths: target }) : null
+    }
+    case 'move_file':
+    case 'copy_file': {
+      const targets = (action.type === 'move_file' ? [action.from, action.to] : [action.to])
+        .map((raw) => outsideTarget(ctx, raw))
+        .filter((p): p is string => !!p)
+      return targets.length ? need('delete_outside_workspace', 'high', { paths: targets.join(', ') }) : null
+    }
+    case 'download_file': {
+      const target = outsideTarget(ctx, action.destination)
+      return target ? need('delete_outside_workspace', 'high', { paths: target, target: action.url }) : null
+    }
     // A recognition program the agent names itself is a command like any other.
     case 'transcribe_audio':
       return action.command?.trim()
@@ -850,17 +899,8 @@ function outsideTarget(ctx: ClassifyContext, raw: unknown): string | undefined {
   return isInsideWorkspace(ctx.cwd, target) || isTemporaryPath(target) ? undefined : target
 }
 
-/** Direct-tool names (interactive brain path) that are not AgentActions: delete_file / delete_directory / move_file. */
+/** Direct-tool calls (interactive brain path): the same rules as the matching AgentAction. */
 export function classifyDirectToolNeed(name: string, input: Record<string, unknown>, ctx: ClassifyContext): ApprovalNeed | null {
-  const outside = (raw: unknown) => outsideTarget(ctx, raw)
-  if (name === 'delete_file' || name === 'delete_directory') {
-    const target = outside(input.path)
-    return target ? need('delete_outside_workspace', 'high', { paths: target }) : null
-  }
-  if (name === 'move_file') {
-    const targets = [outside(input.from), outside(input.to)].filter((p): p is string => !!p)
-    return targets.length ? need('delete_outside_workspace', 'high', { paths: targets.join(', ') }) : null
-  }
   return classifyApprovalNeed({ type: name, ...input } as AgentAction, ctx)
 }
 
@@ -924,7 +964,7 @@ export class ApprovalRuntime {
     if (!found) return { ok: true }
     // A server the host names: its URL in the config the call uses.
     const serverUrl =
-      (action.type === 'mcp_call_tool' || action.type === 'mcp_run_command') && needsServerUrl(this.options.policy, action.serverId)
+      action.type === 'mcp_call_tool' && needsServerUrl(this.options.policy, action.serverId)
         ? resolved
           ? resolved.url
           : await liveMcpServerUrl(cwd, action.serverId)

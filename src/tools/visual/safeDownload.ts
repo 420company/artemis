@@ -5,6 +5,7 @@
 // address. The check runs inside the socket's DNS lookup, so the address that
 // is checked is the address that is connected to (no DNS-rebinding window).
 // Loopback is allowed only when the provider itself is configured on loopback.
+// The same guard serves the check_url / download_file tools (tools/extras.ts).
 
 import { lookup as dnsLookup } from 'node:dns/promises';
 import http from 'node:http';
@@ -26,7 +27,9 @@ for (const [network, prefix] of [
   ['127.0.0.0', 8],
   ['169.254.0.0', 16],
   ['172.16.0.0', 12],
+  ['192.0.0.0', 24],
   ['192.168.0.0', 16],
+  ['198.18.0.0', 15],
   ['224.0.0.0', 4],
   ['240.0.0.0', 4],
 ] as const) {
@@ -53,14 +56,55 @@ function ipFamily(address: string): 'ipv4' | 'ipv6' {
   return isIP(address) === 6 ? 'ipv6' : 'ipv4';
 }
 
-/** An IPv4-mapped IPv6 address (::ffff:a.b.c.d) is checked as IPv4. */
-function unmapped(address: string): string {
-  const match = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(address);
-  return match ? match[1]! : address;
+/** The 16 bytes of an IPv6 address (with or without a dotted IPv4 tail), or undefined. */
+function ipv6Bytes(address: string): number[] | undefined {
+  let text = address.replace(/^\[|\]$/g, '').split('%')[0]!;
+  const tail = /(\d{1,3}(?:\.\d{1,3}){3})$/.exec(text);
+  if (tail) {
+    const quad = tail[1]!.split('.').map(Number);
+    if (quad.some((n) => n > 255)) return undefined;
+    text = `${text.slice(0, -tail[1]!.length)}${((quad[0]! << 8) | quad[1]!).toString(16)}:${((quad[2]! << 8) | quad[3]!).toString(16)}`;
+  }
+  const halves = text.split('::');
+  if (halves.length > 2) return undefined;
+  const parse = (part: string) => (part ? part.split(':') : []);
+  const head = parse(halves[0]!);
+  const rest = halves.length === 2 ? parse(halves[1]!) : [];
+  const missing = 8 - head.length - rest.length;
+  if (halves.length === 2 ? missing < 0 : missing !== 0) return undefined;
+  const groups = [...head, ...Array(Math.max(0, missing)).fill('0'), ...rest];
+  const bytes: number[] = [];
+  for (const group of groups) {
+    if (!/^[0-9a-f]{1,4}$/i.test(group)) return undefined;
+    const value = parseInt(group, 16);
+    bytes.push(value >> 8, value & 0xff);
+  }
+  return bytes;
+}
+
+/**
+ * The IPv4 address an IPv6 address carries, for the forms that reach an IPv4
+ * host: IPv4-mapped (::ffff:0:0/96), IPv4-compatible (::/96), NAT64
+ * (64:ff9b::/96 and the local-use 64:ff9b:1::/48) and 6to4 (2002::/16).
+ */
+export function embeddedIpv4(address: string): string | undefined {
+  if (isIP(address.replace(/^\[|\]$/g, '').split('%')[0]!) !== 6) return undefined;
+  const b = ipv6Bytes(address);
+  if (!b) return undefined;
+  const zero = (from: number, to: number) => b.slice(from, to).every((x) => x === 0);
+  const v4 = (at: number) => b.slice(at, at + 4).join('.');
+  if (zero(0, 10) && b[10] === 0xff && b[11] === 0xff) return v4(12);
+  if (zero(0, 12) && !zero(12, 16)) return v4(12);
+  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b) {
+    if (zero(4, 12)) return v4(12);
+    if (b[4] === 0x00 && b[5] === 0x01) return v4(12);
+  }
+  if (b[0] === 0x20 && b[1] === 0x02) return v4(2);
+  return undefined;
 }
 
 export function isNonPublicAddress(address: string, options: { allowLoopback?: boolean } = {}): boolean {
-  const ip = unmapped(address);
+  const ip = embeddedIpv4(address) ?? address.replace(/^\[|\]$/g, '').split('%')[0]!;
   const family = ipFamily(ip);
   if (options.allowLoopback && LOOPBACK.check(ip, family)) return false;
   return NON_PUBLIC.check(ip, family);
@@ -72,27 +116,28 @@ export type AssetHostResolver = (hostname: string) => Promise<ResolvedAddress[]>
 /** One HTTP GET without following redirects; `lookup` must be used for the connection. */
 export type AssetTransport = (
   url: URL,
-  options: { lookup: LookupFunction; signal: AbortSignal },
-) => Promise<{ status: number; location?: string; contentType?: string; body: Buffer }>;
+  options: { lookup: LookupFunction; signal: AbortSignal; method?: 'GET' | 'HEAD' },
+) => Promise<{ status: number; location?: string; contentType?: string; body: Buffer; statusText?: string }>;
 
 const systemResolver: AssetHostResolver = (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
 
-const nodeTransport: AssetTransport = (url, { lookup, signal }) =>
+const nodeTransport: AssetTransport = (url, { lookup, signal, method }) =>
   new Promise((resolve, reject) => {
     const client = url.protocol === 'https:' ? https : http;
-    const req = client.get(url, { lookup, signal }, (res) => {
+    const req = client.request(url, { method: method ?? 'GET', lookup, signal }, (res) => {
       const status = res.statusCode ?? 0;
       if (status >= 300 && status < 400) {
         res.resume();
-        resolve({ status, location: res.headers.location, body: Buffer.alloc(0) });
+        resolve({ status, statusText: res.statusMessage, location: res.headers.location, body: Buffer.alloc(0) });
         return;
       }
       const chunks: Buffer[] = [];
       res.on('data', (chunk: Buffer) => chunks.push(chunk));
-      res.on('end', () => resolve({ status, contentType: res.headers['content-type'], body: Buffer.concat(chunks) }));
+      res.on('end', () => resolve({ status, statusText: res.statusMessage, contentType: res.headers['content-type'], body: Buffer.concat(chunks) }));
       res.on('error', reject);
     });
     req.on('error', reject);
+    req.end();
   });
 
 let resolver: AssetHostResolver = systemResolver;
@@ -192,6 +237,23 @@ export async function downloadGuardedUrl(
   rawUrl: string,
   options: GuardedDownloadOptions,
 ): Promise<{ body: Buffer; contentType?: string }> {
+  const res = await guardedRequest(rawUrl, options);
+  if (res.status < 200 || res.status >= 300) {
+    throw new AssetDownloadError(`download failed: HTTP ${res.status}`, res.status);
+  }
+  return { body: res.body, contentType: res.contentType };
+}
+
+/**
+ * One guarded request (GET or HEAD): every hop's address is checked, the
+ * connection uses the checked address, and redirects are followed by hand
+ * (each one checked again). Returns the final response whatever its status;
+ * throws AssetDownloadError on a refusal or a network failure.
+ */
+export async function guardedRequest(
+  rawUrl: string,
+  options: GuardedDownloadOptions & { method?: 'GET' | 'HEAD' },
+): Promise<{ status: number; statusText?: string; contentType?: string; body: Buffer; url: string }> {
   const allowLoopback = options.allowLoopback === true;
   const timeout = AbortSignal.timeout(options.timeoutMs);
   const signal = options.signal ? AbortSignal.any([timeout, options.signal]) : timeout;
@@ -201,7 +263,7 @@ export async function downloadGuardedUrl(
     const url = await checkUrl(current, allowLoopback);
     let res: Awaited<ReturnType<AssetTransport>>;
     try {
-      res = await transport(url, { lookup, signal });
+      res = await transport(url, { lookup, signal, ...(options.method ? { method: options.method } : {}) });
     } catch (error) {
       if (error instanceof AssetDownloadError) throw error;
       throw new AssetDownloadError(`download failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -211,10 +273,7 @@ export async function downloadGuardedUrl(
       current = new URL(res.location, url).toString();
       continue;
     }
-    if (res.status < 200 || res.status >= 300) {
-      throw new AssetDownloadError(`download failed: HTTP ${res.status}`, res.status);
-    }
-    return { body: res.body, contentType: res.contentType };
+    return { status: res.status, statusText: res.statusText, contentType: res.contentType, body: res.body, url: url.toString() };
   }
   throw new AssetDownloadError(`download failed: more than ${MAX_REDIRECTS} redirects`);
 }

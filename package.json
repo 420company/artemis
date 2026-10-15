@@ -55,7 +55,7 @@
     "lint:fix": "node node_modules/eslint/bin/eslint.js 'src/**/*.ts' --fix",
     "test:system": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/systemSmoke.ts",
     "test:prompt": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/promptSmoke.ts",
-    "test:runtime": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/runtimeSmoke.ts && npm run test:identity && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/windowsInputSmoke.ts && npm run test:contextReplay && npm run test:compaction && npm run test:skills && npm run test:selfCheck && npm run test:sessionEdit && npm run test:researchReport && npm run test:speech && npm run test:phoneCall && npm run test:copilot && npm run test:browserLive && npm run test:approvals && npm run test:progressStream && npm run test:goalTick && npm run test:readDocument && npm run test:skillLibrary && npm run test:skillText",
+    "test:runtime": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/runtimeSmoke.ts && npm run test:identity && node --no-warnings node_modules/tsx/dist/cli.mjs scripts/windowsInputSmoke.ts && npm run test:contextReplay && npm run test:compaction && npm run test:skills && npm run test:selfCheck && npm run test:sessionEdit && npm run test:researchReport && npm run test:speech && npm run test:phoneCall && npm run test:copilot && npm run test:browserLive && npm run test:approvals && npm run test:progressStream && npm run test:goalTick && npm run test:readDocument && npm run test:skillLibrary && npm run test:skillText && npm run test:toolSafety",
     "test:copilot": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/copilotSmoke.ts",
     "test:credentials-browser": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/credentialBrowserSmoke.ts",
     "test:skills": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/skillLearningSmoke.ts",
@@ -93,6 +93,7 @@
     "test:skillText": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/skillTextGuard.ts",
     "test:internalNames": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/internalNamesGuardSmoke.ts",
     "test:workflowRouter": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/workflowRouterSmoke.ts",
+    "test:toolSafety": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/toolSafetySmoke.ts",
     "eval:zh": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/evalZh.ts",
     "eval:zh:mock": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/evalZh.ts --mock --self-test"
   },

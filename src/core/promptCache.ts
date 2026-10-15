@@ -5,6 +5,7 @@ import type { PermissionManager } from '../security/permissions.js';
 import { buildMcpRuntimeSections } from '../mcp/runtime.js';
 import { resolveDataRootDir } from '../utils/fs.js';
 import { getToolHostKey } from '../tools/platformSupport.js';
+import { resolveToolManifestTier } from '../tools/registry.js';
 import {
   PROJECT_INSTRUCTION_FILENAMES,
   buildProjectInstructionFileSection,
@@ -35,7 +36,7 @@ type PromptRuntimeCacheStats = {
   size: number;
 };
 
-const PROMPT_CACHE_SCHEMA_VERSION = 3; // WP-18 phase 2: core-only manifest
+const PROMPT_CACHE_SCHEMA_VERSION = 4; // full manifest by default again; lazy tools are opt-in
 const stableProviderSystemCache = new Map<string, StableProviderSystemCacheEntry>();
 const promptRuntimeCacheStats: PromptRuntimeCacheStats = {
   hits: 0,
@@ -77,9 +78,9 @@ async function buildStablePromptCacheKey(
     getFileSignature(path.join(resolveDataRootDir(options.cwd), 'mcp-servers.json')),
   ]);
 
-  // WP-18 phase 2: the tool manifest now depends on the load tier
-  // (core-only by default; ARTEMIS_ALL_TOOLS=1 forces legacy full mode).
-  const manifestTier = process.env.ARTEMIS_ALL_TOOLS === '1' ? 'all' : 'core';
+  // The tool manifest depends on the load tier (full by default;
+  // ARTEMIS_LAZY_TOOLS=1 opts into the dormant core-only mode).
+  const manifestTier = resolveToolManifestTier();
   return hashString(
     JSON.stringify({
       schema: PROMPT_CACHE_SCHEMA_VERSION,

@@ -68,13 +68,11 @@ const GIT_TOOLS = [
 
 const DOCS_TOOLS = [
   'lookup_docs',
-  'http_request',
   'parse_url',
   'check_url',
 ] as const;
 
 const NETWORK_TOOLS = [
-  'http_request',
   'check_url',
   'download_file',
   'dns_lookup',
@@ -399,7 +397,7 @@ export function projectDirectToolNames(messages: SessionMessage[]): string[] {
   }
 
   if (wantsExternalProtocolDebug) {
-    addTools(selected, ['search_web', 'http_request', 'lookup_docs']);
+    addTools(selected, ['search_web', 'lookup_docs']);
   }
 
   if (wantsTextUtility) {
