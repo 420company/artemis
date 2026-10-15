@@ -130,6 +130,14 @@ export async function runCli(argv: string[]): Promise<void> {
     process.exit(exitCode)
   }
 
+  // The owner's news interest topics (a host's morning job): headless, once, then exit.
+  if (options.command === 'interests') {
+    const { runInterestsCommand } = await import('./interestsCommand.js')
+    const { exitCode } = await runInterestsCommand({ cwd: options.cwd, locale, args: options.promptArgs ?? [] })
+    await new Promise<void>((resolve) => process.stdout.write('', () => resolve()))
+    process.exit(exitCode)
+  }
+
   // ── retry ─────────────────────────────────────────────────────────────────
   // Q5: standalone `artemis retry [--session <id>] [--json]`. Delegates to the
   // same headless retry path as `execute --retry` (services/headlessAgent.ts).

@@ -44,6 +44,7 @@ export type CliCommand =
   | 'memory'
   | 'goal'
   | 'dream'
+  | 'interests'
   | 'browser-host'
   | 'retry'
 
@@ -91,7 +92,7 @@ const CLI_COMMANDS = new Set<CliCommand>([
   'chat', 'help', 'version', 'config', 'setup', 'doctor',
   'resume', 'tool', 'analyze', 'execute', 'skill', 'skills', 'audit', 'session',
   'run', 'athena', 'design', 'niko', 'contest', 'nidhogg',
-  'wordup', 'bragi', 'gateway', 'mcp', 'heimdall', 'memory', 'goal', 'dream',
+  'wordup', 'bragi', 'gateway', 'mcp', 'heimdall', 'memory', 'goal', 'dream', 'interests',
   // For a platform host only (not in the help): the live browser host in the foreground.
   'browser-host',
   'retry',
@@ -150,6 +151,7 @@ ${t('命令', 'Commands')}:
   help              ${t('显示帮助', 'Show help')}
   memory            ${t('管理长期学习认知', 'Manage long-term AI memory')}
   dream             ${t('无界面写一篇梦境日记并配图后退出（--out <目录>；--no-image；--video；--date YYYY-MM-DD；--require-activity；--json）', 'Write one dream diary with a picture headlessly and exit (--out <dir>; --no-image; --video; --date YYYY-MM-DD; --require-activity; --json)')}
+  interests         ${t('无界面整理每日资讯推荐用的兴趣话题后退出（--locale；--since-hours <n>；--json）', 'Derive the news interest topics headlessly and exit (--locale; --since-hours <n>; --json)')}
 
 ${t('选项', 'Options')}:
   --model <name>
