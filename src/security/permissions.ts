@@ -263,12 +263,6 @@ function describeAction(action: AgentAction): string {
       return `ask the owner for the code ${action.site} sent`;
     case 'load_tools':
       return `load schemas for tools: ${action.tools.join(', ')}`;
-    case 'get_balance':
-      return `check the ${action.chain} balance of ${action.address}`;
-    case 'swap_quote':
-      return `get a swap quote for ${action.amount} ${action.from} to ${action.to} on ${action.chain}`;
-    case 'send_transaction':
-      return `send ${action.amount} ${action.token} to ${action.to} on ${action.chain} (after the owner approves)`;
     case 'edit_timeline':
       return `edit video timeline: ${action.action}`;
     case 'delete_file': return `delete file`;

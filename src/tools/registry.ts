@@ -77,9 +77,6 @@ import { executeGenerateVideo } from './generateVideo.js';
 import { executeSynthesizeSpeech } from './synthesizeSpeech.js';
 import { executeTranscribeAudio } from './transcribeAudio.js';
 import { executePlaceCall, PLACE_CALL_DESCRIPTION } from './phoneCall/placeCall.js';
-import { GET_BALANCE_DESCRIPTION } from './wallet/getBalance.js';
-import { SWAP_QUOTE_DESCRIPTION } from './wallet/swapQuote.js';
-import { SEND_TRANSACTION_DESCRIPTION } from './wallet/sendTransaction.js';
 import { executeOfficeDocument } from './officeDocuments.js';
 import { CREATE_DOCUMENT_DESCRIPTION, CREATE_PRESENTATION_DESCRIPTION, CREATE_SPREADSHEET_DESCRIPTION, validateOfficeAction } from './office/descriptions.js';
 import { executeInsertInFile } from './insertInFile.js';
@@ -105,7 +102,6 @@ import { executeAgentIdentity, validateAgentIdentityAction } from './agentIdenti
 import { executeUseWorkflow, USE_WORKFLOW_DESCRIPTION } from './useWorkflow.js';
 import { isToolSupportedOnHost } from './platformSupport.js';
 import { createLoadToolsToolDef, LOAD_TOOLS_TYPE } from './toolLoader.js';
-import { normalizeChain, normalizeAddress, normalizeToken, normalizeAmount, normalizeQuoteId } from './wallet/walletConfig.js';
 
 export type { ToolDefinition };
 
@@ -766,180 +762,6 @@ function validatePlaceCallAction(action: any): string[] {
   return errors;
 }
 
-function validateGetBalanceAction(action: any): string[] {
-  const errors: string[] = [];
-
-  // Runs a normalizer and collects a specific error.
-  // Throws, null, undefined, empty strings, and { ok: false } results are all treated as invalid.
-  const check = (fn: unknown, value: unknown, field: string, ...extra: unknown[]): unknown => {
-    if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
-      errors.push(`${field} is required`);
-      return undefined;
-    }
-    const describe = (v: unknown): string => {
-      try {
-        const s = typeof v === 'string' ? v : JSON.stringify(v);
-        return s === undefined ? String(v) : s.length > 120 ? `${s.slice(0, 117)}...` : s;
-      } catch {
-        return String(v);
-      }
-    };
-    try {
-      const result = (fn as (...args: unknown[]) => unknown)(value, ...extra);
-      if (result === null || result === undefined || (typeof result === 'string' && result.trim() === '')) {
-        errors.push(`${field} is invalid: ${describe(value)}`);
-        return undefined;
-      }
-      if (typeof result === 'object' && (result as { ok?: unknown }).ok === false) {
-        const r = result as { error?: unknown; reason?: unknown; message?: unknown };
-        const detail = [r.error, r.reason, r.message].find((x) => typeof x === 'string' && x.length > 0);
-        errors.push(`${field} is invalid: ${typeof detail === 'string' ? detail : describe(value)}`);
-        return undefined;
-      }
-      return result;
-    } catch (err) {
-      const msg = err instanceof Error && err.message ? err.message : describe(value);
-      errors.push(`${field} is invalid: ${msg}`);
-      return undefined;
-    }
-  };
-
-  const chain = check(normalizeChain, action?.chain, 'chain');
-  if (chain !== undefined) {
-    check(normalizeAddress, action?.address, 'address', chain);
-  } else {
-    check(normalizeAddress, action?.address, 'address');
-  }
-
-  return errors;
-}
-
-function validateSwapQuoteAction(action: any): string[] {
-  const errors: string[] = [];
-
-  // Runs a normalizer and collects a specific error.
-  // Throws, null, undefined, empty strings, and { ok: false } results are all treated as invalid.
-  const check = (fn: unknown, value: unknown, field: string, ...extra: unknown[]): unknown => {
-    if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
-      errors.push(`${field} is required`);
-      return undefined;
-    }
-    const describe = (v: unknown): string => {
-      try {
-        const s = typeof v === 'string' ? v : JSON.stringify(v);
-        return s === undefined ? String(v) : s.length > 120 ? `${s.slice(0, 117)}...` : s;
-      } catch {
-        return String(v);
-      }
-    };
-    try {
-      const result = (fn as (...args: unknown[]) => unknown)(value, ...extra);
-      if (result === null || result === undefined || (typeof result === 'string' && result.trim() === '')) {
-        errors.push(`${field} is invalid: ${describe(value)}`);
-        return undefined;
-      }
-      if (typeof result === 'object' && (result as { ok?: unknown }).ok === false) {
-        const r = result as { error?: unknown; reason?: unknown; message?: unknown };
-        const detail = [r.error, r.reason, r.message].find((x) => typeof x === 'string' && x.length > 0);
-        errors.push(`${field} is invalid: ${typeof detail === 'string' ? detail : describe(value)}`);
-        return undefined;
-      }
-      return result;
-    } catch (err) {
-      const msg = err instanceof Error && err.message ? err.message : describe(value);
-      errors.push(`${field} is invalid: ${msg}`);
-      return undefined;
-    }
-  };
-
-  // Derives a comparable key from a normalized token (string or object form).
-  const tokenKey = (t: unknown): string => {
-    if (typeof t === 'string') return t.trim().toLowerCase();
-    if (t && typeof t === 'object') {
-      const o = t as { address?: unknown; symbol?: unknown; id?: unknown };
-      for (const k of [o.address, o.id, o.symbol]) {
-        if (typeof k === 'string' && k.trim() !== '') return k.trim().toLowerCase();
-      }
-      try {
-        return JSON.stringify(t);
-      } catch {
-        return String(t);
-      }
-    }
-    return String(t);
-  };
-
-  const chain = check(normalizeChain, action?.chain, 'chain');
-  const extra: unknown[] = chain !== undefined ? [chain] : [];
-  const from = check(normalizeToken, action?.from, 'from', ...extra);
-  const to = check(normalizeToken, action?.to, 'to', ...extra);
-  check(normalizeAmount, action?.amount, 'amount');
-
-  if (from !== undefined && to !== undefined && tokenKey(from) === tokenKey(to)) {
-    errors.push(`from and to must be different tokens: both resolve to ${tokenKey(from)}`);
-  }
-
-  return errors;
-}
-
-function validateSendTransactionAction(action: any): string[] {
-  const errors: string[] = [];
-
-  // Runs a normalizer and collects a specific error.
-  // Throws, null, undefined, empty strings, and { ok: false } results are all treated as invalid.
-  const check = (fn: unknown, value: unknown, field: string, ...extra: unknown[]): unknown => {
-    if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) {
-      errors.push(`${field} is required`);
-      return undefined;
-    }
-    const describe = (v: unknown): string => {
-      try {
-        const s = typeof v === 'string' ? v : JSON.stringify(v);
-        return s === undefined ? String(v) : s.length > 120 ? `${s.slice(0, 117)}...` : s;
-      } catch {
-        return String(v);
-      }
-    };
-    try {
-      const result = (fn as (...args: unknown[]) => unknown)(value, ...extra);
-      if (result === null || result === undefined || (typeof result === 'string' && result.trim() === '')) {
-        errors.push(`${field} is invalid: ${describe(value)}`);
-        return undefined;
-      }
-      if (typeof result === 'object' && (result as { ok?: unknown }).ok === false) {
-        const r = result as { error?: unknown; reason?: unknown; message?: unknown };
-        const detail = [r.error, r.reason, r.message].find((x) => typeof x === 'string' && x.length > 0);
-        errors.push(`${field} is invalid: ${typeof detail === 'string' ? detail : describe(value)}`);
-        return undefined;
-      }
-      return result;
-    } catch (err) {
-      const msg = err instanceof Error && err.message ? err.message : describe(value);
-      errors.push(`${field} is invalid: ${msg}`);
-      return undefined;
-    }
-  };
-
-  const chain = check(normalizeChain, action?.chain, 'chain');
-  const extra: unknown[] = chain !== undefined ? [chain] : [];
-  check(normalizeAddress, action?.to, 'to', ...extra);
-  check(normalizeToken, action?.token, 'token', ...extra);
-  check(normalizeAmount, action?.amount, 'amount');
-
-  // quoteId is optional: undefined is allowed; an explicit null or any invalid value is rejected.
-  if (action?.quoteId !== undefined) {
-    if (action.quoteId === null) {
-      errors.push('quoteId is invalid: null (omit the field instead of passing null)');
-    } else if (typeof action.quoteId !== 'string') {
-      errors.push(`quoteId is invalid: must be a string, got ${typeof action.quoteId}`);
-    } else {
-      check(normalizeQuoteId, action.quoteId, 'quoteId');
-    }
-  }
-
-  return errors;
-}
-
 function validateTranscribeAudioAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.inputPath, 'inputPath', errors);
@@ -1403,45 +1225,6 @@ const actionToolDefs: ToolDefinition[] = [
     parallelSafe: false,
     validate: validatePlaceCallAction,
     execute: ((action: any, context: any) => executePlaceCall(action, context)) as any,
-  },
-  {
-    type: 'get_balance',
-    description: GET_BALANCE_DESCRIPTION,
-    kind: 'code',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateGetBalanceAction,
-    execute: (async (action: any, context: any) => {
-      const { executeGetBalance } = await import('./wallet/getBalance.js');
-      return executeGetBalance(action, context);
-    }) as any,
-  },
-  {
-    type: 'swap_quote',
-    description: SWAP_QUOTE_DESCRIPTION,
-    kind: 'code',
-    permissionCategory: 'read',
-    executionMode: 'blocking',
-    parallelSafe: true,
-    validate: validateSwapQuoteAction,
-    execute: (async (action: any, context: any) => {
-      const { executeSwapQuote } = await import('./wallet/swapQuote.js');
-      return executeSwapQuote(action, context);
-    }) as any,
-  },
-  {
-    type: 'send_transaction',
-    description: SEND_TRANSACTION_DESCRIPTION,
-    kind: 'code',
-    permissionCategory: 'execute',
-    executionMode: 'blocking',
-    parallelSafe: false,
-    validate: validateSendTransactionAction,
-    execute: (async (action: any, context: any) => {
-      const { executeSendTransaction } = await import('./wallet/sendTransaction.js');
-      return executeSendTransaction(action, context);
-    }) as any,
   },
   {
     type: 'create_presentation',

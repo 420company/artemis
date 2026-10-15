@@ -1043,12 +1043,6 @@ export type AgentAction =
   | { type: 'post_update'; text: string }
   /** The run's plan as a checklist: the whole list each time (core/todoList.ts). */
   | { type: 'load_tools'; tools: string[] }
-  /** Wallet balance lookup via the hosted platform (tools/wallet/getBalance.ts). */
-  | { type: 'get_balance'; chain: string; address: string }
-  /** READ-ONLY swap quote via the hosted platform (tools/wallet/swapQuote.ts). No transaction is sent. */
-  | { type: 'swap_quote'; chain: string; from: string; to: string; amount: string }
-  /** Send a transaction via the hosted platform; always requires the owner's hard approval (tools/wallet/sendTransaction.ts). */
-  | { type: 'send_transaction'; chain: string; to: string; token: string; amount: string; quoteId?: string }
   | { type: 'todo'; todos: Array<{ id?: string; content: string; status?: TaskStatus }> }
   /** Keys, passwords, SSH bootstrap, VPN setup and checks for a server the agent set up (tools/serverSetup). */
   | ({ type: 'server_setup' } & Omit<import('../tools/serverSetup/serverSetup.js').ServerSetupAction, 'type'>)
@@ -1174,9 +1168,6 @@ export const ALL_AGENT_ACTION_TYPES = [
   'post_update',
   'todo',
   'load_tools',
-  'get_balance',
-  'swap_quote',
-  'send_transaction',
   'server_setup',
   'get_verification_code',
   'agent_mail_address',
