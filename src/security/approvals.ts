@@ -801,7 +801,7 @@ export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext):
       // Loopback is not private on a shared host: a server runs freely only when every directory it may
       // serve is the workspace's (or, for a static one, the temp dir's). One that runs what it serves
       // (php -S, http.server --cgi) only from the workspace. Unknown: it asks.
-      const servesOutside = servers.filter((server) => !server.directories?.length || !server.directories.every((dir) => isInsideWorkspace(ctx.cwd, dir) || (server.kind === 'static' && isTemporaryPath(dir))))
+      const servesOutside = servers.filter((server) => server.unsureRun || !server.directories?.length || !server.directories.every((dir) => isInsideWorkspace(ctx.cwd, dir) || (server.kind === 'static' && isTemporaryPath(dir))))
       if (servesOutside.length) {
         const dirs = [...new Set(servesOutside.flatMap((server) => server.directories ?? []))].filter((dir) => !isInsideWorkspace(ctx.cwd, dir))
         const runs = servesOutside.some((server) => server.kind === 'scripts')
@@ -814,7 +814,7 @@ export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext):
             reason: runs ? 'starts a local web server that runs files from outside the workspace' : 'starts a local web server that serves files from outside the workspace',
             reasonZh: runs ? '会启动一个运行工作区以外文件的本地网页服务' : '会启动一个提供工作区以外文件的本地网页服务',
           },
-          { wording: outsideServerWording(dirs, runs, summary) },
+          { wording: outsideServerWording(dirs, runs, summary, servesOutside.some((server) => server.unsureRun)) },
         )
       }
       return null
@@ -968,16 +968,20 @@ function outsideChangeWording(deletes: DeleteAnalysis, summary: { zh: string; en
 }
 
 /** The card for a local web server that serves (or runs) files from outside the workspace, or from a place not known before it runs. */
-function outsideServerWording(dirs: string[], runs: boolean, summary: { zh: string; en: string } | undefined): NonNullable<ApprovalNeed['wording']> {
-  const where = dirs.length ? { zh: `：${clip(dirs.join('、'), 160)}`, en: `: ${clip(dirs.join(', '), 160)}` } : { zh: '（目录要到运行时才知道）', en: ' (the directory is not known before it runs)' }
+function outsideServerWording(dirs: string[], runs: boolean, summary: { zh: string; en: string } | undefined, unsureRun = false): NonNullable<ApprovalNeed['wording']> {
+  const what = dirs.length
+    ? { zh: `${runs ? '并会运行' : '能读到'}这些位置的文件：${clip(dirs.join('、'), 160)}`, en: `${runs ? 'run' : 'read'} the files at ${clip(dirs.join(', '), 160)}` }
+    : unsureRun
+      ? { zh: '而且它带有会改变运行内容的选项，无法事先确认会运行哪些文件', en: 'run files that cannot be known beforehand (it has options that change what runs)' }
+      : { zh: `${runs ? '并会运行' : '能读到'}的文件所在的目录要到运行时才知道`, en: `${runs ? 'run' : 'read'} files from a directory not known before it runs` }
   return {
     zh: {
       title: runs ? '启动一个运行工作区以外文件的本地网页服务' : '启动一个提供工作区以外文件的本地网页服务',
-      summary: `${summary?.zh ?? ''}它只在本机监听，但本机上的其他程序和用户都能访问，${runs ? '并会运行' : '能读到'}这个目录里的文件${where.zh}。只有你同意后才会运行。`,
+      summary: `${summary?.zh ?? ''}它只在本机监听，但本机上的其他程序和用户都能访问，${what.zh}。只有你同意后才会运行。`,
     },
     en: {
       title: runs ? 'Start a local web server that runs files from outside the workspace' : 'Start a local web server that serves files from outside the workspace',
-      summary: `${summary ? `${summary.en} ` : ''}It listens on this machine only, but other programs and users on this machine can reach it and ${runs ? 'run' : 'read'} the files it serves${where.en}. It runs only if you approve.`,
+      summary: `${summary ? `${summary.en} ` : ''}It listens on this machine only, but other programs and users on this machine can reach it and ${what.en}. It runs only if you approve.`,
     },
   }
 }

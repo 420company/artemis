@@ -1088,6 +1088,22 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
     ['some-fetcher --output /etc/x https://example.com/a', 'an unknown downloader with --output outside'],
     ['some-fetcher --output-dir=/srv/www https://example.com/a', 'an unknown downloader with --output-dir outside'],
     ['some-fetcher --output "$OUT" https://example.com/a', 'an unknown downloader with --output a variable'],
+    ['yt-dlp -P "home:/etc" https://example.com/v', 'yt-dlp -P with a type prefix'],
+    ['yt-dlp -P "temp:/srv/tmp" https://example.com/v', 'yt-dlp -P temp: outside'],
+    ['yt-dlp -o "thumbnail:/etc/%(id)s.jpg" https://example.com/v', 'yt-dlp -o with a type prefix'],
+    ['yt-dlp --cookies /etc/cookies.txt https://example.com/v', 'yt-dlp --cookies outside (saved back)'],
+    ['yt-dlp --exec "rm -rf /x" https://example.com/v', 'yt-dlp --exec'],
+    ['aria2c --log /var/log/aria.log https://example.com/a', 'aria2c --log outside'],
+    ['aria2c -l /var/log/aria.log https://example.com/a', 'aria2c -l outside'],
+    ['aria2c --save-session=/etc/aria.session https://example.com/a', 'aria2c --save-session outside'],
+    // Wrappers that change directory, and wrapper options, for deletes and writes too.
+    ['sudo -u root rm -rf /usr/share/doc', 'sudo with an option, then rm outside'],
+    ['sudo -D /usr/share rm -rf doc', 'sudo -D, then a relative rm'],
+    ['sudo --chdir=/usr/share rm -rf doc', 'sudo --chdir=, then a relative rm'],
+    ['env -C /usr/share rm -rf doc', 'env -C, then a relative rm'],
+    ['env -C /usr/share tee doc/x', 'env -C, then a relative tee'],
+    ['sudo -D /usr/share tee doc/x', 'sudo -D, then a relative tee'],
+    ['env -C "$D" tee x', 'env -C to a directory not known before it runs, then tee'],
   )
   for (const [command, why] of outside) {
     const found = classify(command)
@@ -1107,6 +1123,22 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
     ['busybox httpd -f -p 127.0.0.1:8080 -h /home', 'busybox httpd -h /home'],
     ['cd "$D" && python3 -m http.server --bind 127.0.0.1', 'a cd not known before it runs'],
     ['python3 -m http.server --bind 127.0.0.1 --directory "$D"', 'a directory not known before it runs'],
+    // Wrappers that change the directory of what they run.
+    ['env -C /etc python3 -m http.server --bind 127.0.0.1', 'env -C /etc'],
+    ['env --chdir=/etc python3 -m http.server --bind 127.0.0.1', 'env --chdir=/etc'],
+    ['env -iC /etc python3 -m http.server --bind 127.0.0.1', 'env -iC /etc'],
+    ['sudo -D /etc python3 -m http.server --bind 127.0.0.1', 'sudo -D /etc'],
+    ['sudo --chdir /etc python3 -m http.server --bind 127.0.0.1', 'sudo --chdir /etc'],
+    ['env -C /home php -S 127.0.0.1:8080', 'env -C /home php -S'],
+    ['env -C "$D" python3 -m http.server --bind 127.0.0.1', 'env -C to a directory not known before it runs'],
+    // PHP: a router script outside the workspace, or options that change what runs.
+    ['php -S 127.0.0.1:8080 -t /dev/shm/ws /dev/shm/outside/router.php', 'a docroot and router script outside'],
+    [`php -S 127.0.0.1:8080 -t ${cwd} /usr/share/outside/router.php`, 'a router script outside a docroot inside'],
+    ['php -S 127.0.0.1:8080 -t . ../outside/router.php', 'a router script reached with ..'],
+    ['php -S 127.0.0.1:8080 -d auto_prepend_file=/outside', 'php -d auto_prepend_file'],
+    ['php -S 127.0.0.1:8080 -c /outside/php.ini', 'php -c php.ini'],
+    ['php -n -S 127.0.0.1:8080', 'php -n'],
+    ['php -S 127.0.0.1:8080 -z /outside/ext.so', 'php -z'],
   ]
   for (const [command, why] of servesOutside) {
     const found = classify(command)
@@ -1115,6 +1147,8 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
   const servesHere: [string, string][] = [
     ['python3 -m http.server 8000 --bind 127.0.0.1 --cgi', '--cgi on the workspace'],
     ['php -S 127.0.0.1:8080', 'php -S on the workspace'],
+    ['php -S 127.0.0.1:8080 -t . router.php', 'php -S with a router script in the workspace'],
+    [`env -C ${site} python3 -m http.server --bind 127.0.0.1`, 'env -C into the workspace'],
     [`python3 -m http.server 8000 --bind 127.0.0.1 --directory ${os.tmpdir()}/apr-static-${process.pid}`, 'a static server on the temp dir'],
     [`(cd ${site} && python3 -m http.server --bind 127.0.0.1)`, 'a cd inside a subshell, inside the workspace'],
   ]
@@ -1124,7 +1158,7 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
     homeCard?.title === '启动一个提供工作区以外文件的本地网页服务' && homeCard.summary.includes('/home') && homeCard.summary.includes('只在本机监听') && homeCard.summary.includes('其他程序和用户'), JSON.stringify(homeCard))
   assert('preview: a server that runs what it serves is called that', card('php -S 127.0.0.1:8080 -t /home')?.title === '启动一个运行工作区以外文件的本地网页服务')
   // An output option inside the workspace or the temp dir needs nothing.
-  for (const command of ['aria2c -d downloads https://example.com/a', `aria2c -d ${os.tmpdir()} -o apr-a.bin https://example.com/a`, 'http --download https://example.com/a', 'some-tool --output out/report.json', 'ssh -o StrictHostKeyChecking=no host true']) {
+  for (const command of ['yt-dlp -P "home:media" -o "%(title)s.%(ext)s" https://example.com/v', 'aria2c -l - https://example.com/a', `env -C ${site} tee notes.txt`, 'aria2c -d downloads https://example.com/a', `aria2c -d ${os.tmpdir()} -o apr-a.bin https://example.com/a`, 'http --download https://example.com/a', 'some-tool --output out/report.json', 'ssh -o StrictHostKeyChecking=no host true']) {
     assert(`preview: a download or output inside needs nothing — ${command}`, kind(command) === null, JSON.stringify(classify(command)))
   }
   assert('preview: a subshell inside the workspace with a cd needs nothing', kind(`cd ${path.join(cwd, 'sites')} && (cd guihua-latte-poster && rm -rf old) && rm -rf build`) === null)

@@ -340,7 +340,7 @@ const LOCKOUT: ShellRisk = { reason: 'could cut off access to this machine or de
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
 /** Wrappers that run the command after their own options, and which of those options take a value. */
 const WRAPPER_OPTIONS: Record<string, RegExp> = {
-  sudo: /^-[ugCphUrtD]$/,
+  sudo: /^-[ugCphUrtD]$|^--(?:chdir|user|group|host|prompt|role|type|other-user|close-from|command-timeout)$/,
   doas: /^-[uC]$/,
   env: /^-[uC]$|^--(?:unset|chdir)$/,
   nice: /^-n$/,
@@ -357,6 +357,18 @@ const WRAPPER_OPTIONS: Record<string, RegExp> = {
   taskset: /^$/,
 }
 
+/** Short options of a wrapper that take a value, also as the last letter of a cluster (`env -iC DIR`, `sudo -nu root`). */
+const WRAPPER_VALUE_LETTERS: Record<string, string> = { sudo: 'ugCphUrtD', doas: 'uC', env: 'uC' }
+/** The wrappers that change the directory of what they run, and their option letter (`env -C DIR`, `sudo -D DIR`, both `--chdir`). */
+const WRAPPER_CHDIR_LETTER: Record<string, string> = { env: 'C', sudo: 'D' }
+
+/** How many words a wrapper's option takes (itself, and its value when that is the next word). */
+function wrapperOptionWidth(name: string, word: string, takesValue: RegExp): number {
+  if (takesValue.test(word)) return 2
+  const letters = WRAPPER_VALUE_LETTERS[name]
+  return letters && /^-[A-Za-z]{2,}$/.test(word) && letters.includes(word.at(-1)!) ? 2 : 1
+}
+
 /** The command a segment runs, after assignments, `{`/`!`/`then`…, and wrappers with their options. */
 export function commandHead(words: string[]): { index: number; name: string } | undefined {
   let i = 0
@@ -369,12 +381,71 @@ export function commandHead(words: string[]): { index: number; name: string } | 
     if (!takesValue) return { index: i, name }
     i++
     while (i < words.length && /^-/.test(words[i]!) && words[i] !== '--') {
-      i += takesValue.test(words[i]!) ? 2 : 1
+      i += wrapperOptionWidth(name, words[i]!, takesValue)
     }
     if (words[i] === '--') i++
     if (name === 'env') while (i < words.length && ASSIGNMENT.test(words[i]!)) i++
     if (name === 'timeout' || name === 'chrt' || name === 'taskset') i++
   }
+}
+
+/**
+ * The directory changes the wrappers of a segment make for the command
+ * they run (`env -C DIR`, `env --chdir=DIR`, `sudo -D DIR`, `sudo
+ * --chdir DIR`), in order: each as written (`~`/`$HOME` expanded), or
+ * undefined when it is not known before it runs.
+ */
+export function wrapperDirectoryChanges(words: string[]): (string | undefined)[] {
+  const out: (string | undefined)[] = []
+  let i = 0
+  for (;;) {
+    while (i < words.length && (ASSIGNMENT.test(words[i]!) || LEADING_WORDS.has(words[i]!))) i++
+    const word = words[i]
+    if (word === undefined) return out
+    const name = path.basename(word)
+    const takesValue = WRAPPER_OPTIONS[name]
+    if (!takesValue) return out
+    const letter = WRAPPER_CHDIR_LETTER[name]
+    i++
+    while (i < words.length && /^-/.test(words[i]!) && words[i] !== '--') {
+      const a = words[i]!
+      let width = wrapperOptionWidth(name, a, takesValue)
+      if (letter) {
+        let value: string | undefined
+        let named = false
+        if (a.startsWith('--chdir=')) {
+          named = true
+          value = a.slice('--chdir='.length)
+        } else if (a === '--chdir') {
+          named = true
+          value = words[i + 1]
+          width = 2
+        } else if (/^-[A-Za-z]/.test(a) && !a.startsWith('--') && a.slice(1).includes(letter)) {
+          const at = a.indexOf(letter)
+          const attached = a.slice(at + 1)
+          named = true
+          value = attached || words[i + 1]
+          width = attached ? 1 : 2
+        }
+        if (named) out.push(value === undefined || value === '' ? undefined : staticPath(value))
+      }
+      i += width
+    }
+    if (words[i] === '--') i++
+    if (name === 'env') while (i < words.length && ASSIGNMENT.test(words[i]!)) i++
+    if (name === 'timeout' || name === 'chrt' || name === 'taskset') i++
+  }
+}
+
+/** The directories a segment's command may run in, after its wrappers' directory changes (undefined: not known). */
+function afterWrapperChanges(words: string[], bases: string[] | undefined): { bases: string[] | undefined; changed: boolean } {
+  const changes = wrapperDirectoryChanges(words)
+  let out = bases
+  for (const change of changes) {
+    if (change === undefined || out === undefined) out = undefined
+    else out = path.isAbsolute(change) ? [change] : [...new Set(out.map((base) => path.resolve(base, change)))]
+  }
+  return { bases: out, changed: changes.length > 0 }
 }
 
 const SHELL_NAME = new RegExp(`^${SHELLS}$`)
@@ -956,9 +1027,26 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
     if (/(?:^|[\s;&|(])(?:function\s+[A-Za-z_][\w-]*|[A-Za-z_][\w-]*\s*\(\s*\))\s*\{/.test(command)) flag('defines a function that deletes or overwrites files', '定义了一个会删除或改写文件的函数')
   }
 
+  // The directories as the shell keeps them (a cd); a wrapper's directory change applies to its one command.
+  let shellHeres = heres
+  let shellUnknown = false
   for (const parsed of shellCommands(fullCommand)) {
     const segment = parsed.words
-    const i = commandIndex(segment)
+    heres = shellHeres
+    hereUnknown = shellUnknown
+    const wrapped = afterWrapperChanges(segment, heres)
+    if (wrapped.changed) {
+      if (wrapped.bases === undefined) {
+        if (destructive) flag('changes to a directory not known before it runs', '会切换到一个运行时才知道的目录')
+        hereUnknown = true
+      } else {
+        heres = wrapped.bases
+      }
+    }
+    // The command itself, past wrappers and their options (`sudo -u root rm …`, `env -C /etc tee …`).
+    const wrapper = path.basename(segment[commandIndex(segment)] ?? '')
+    const resolved = commandHead(segment)
+    const i = resolved && (WRAPPER_OPTIONS[wrapper] || (segment[commandIndex(segment)] ?? '').startsWith('-')) ? resolved.index : commandIndex(segment)
     const head = path.basename(segment[i] ?? '')
     const args = segment.slice(i + 1)
     const plain = withoutRedirections(args)
@@ -972,20 +1060,20 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
       const known = target === undefined ? homedir() : staticPath(target)
       if (known === undefined) {
         if (destructive) flag('changes to a directory not known before it runs', '会切换到一个运行时才知道的目录')
-        hereUnknown = true
+        shellUnknown = true
       } else {
-        const next = [...new Set([...heres, ...heres.map((base) => path.resolve(base, known))])]
+        const next = [...new Set([...shellHeres, ...shellHeres.map((base) => path.resolve(base, known))])]
         if (next.length > MAX_DIRECTORIES) {
           if (destructive) flag('changes directory too many times to follow', '切换目录的次数太多，无法逐一确认')
-          hereUnknown = true
+          shellUnknown = true
         } else {
-          heres = next
+          shellHeres = next
         }
       }
       continue
     }
     if (head === 'popd') continue
-    if (COMPLEX_WRAPPERS.has(head) && DESTRUCTIVE_TOKEN.test(segmentText)) flag(`runs a destructive command through ${head}`, `会通过 ${head} 运行会删除或改写文件的命令`)
+    if ((COMPLEX_WRAPPERS.has(head) || COMPLEX_WRAPPERS.has(wrapper)) && DESTRUCTIVE_TOKEN.test(segmentText)) flag(`runs a destructive command through ${COMPLEX_WRAPPERS.has(wrapper) ? wrapper : head}`, `会通过 ${COMPLEX_WRAPPERS.has(wrapper) ? wrapper : head} 运行会删除或改写文件的命令`)
     if (INTERPRETER_RE.test(head) && args.some((a) => new RegExp(`^(?:${INLINE_FLAG}|-r|--eval|--command)$`).test(a))) checkInlineCode(args.join(' '))
     // A program read from a here-document is inline code too.
     else if (INTERPRETER_RE.test(head) && parsed.heredoc) checkInlineCode(parsed.heredoc.body)
@@ -1105,6 +1193,8 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
     }
   }
   // A redirect may come before or after a cd: it must be fine from every directory it may run in.
+  heres = shellHeres
+  hereUnknown = shellUnknown
   operation = 'write'
   for (const target of redirectTargets(command)) check(target, true)
   return {
@@ -1140,46 +1230,68 @@ function genericOutputs(args: string[]): string[] {
 /** Where aria2c, httpie and other downloaders save (files by name, directories under the remote name). */
 function otherDownloadTargets(head: string, args: string[]): { files: string[]; directories: (string | undefined)[]; unknown?: { en: string; zh: string } } {
   const files: string[] = genericOutputs(args)
-  let dir: string | undefined
-  let named: string | undefined
+  const dirs: string[] = []
+  const named: string[] = []
   let download = !HTTPIE.has(head)
   let unknown: { en: string; zh: string } | undefined
+  const fromFile = { en: 'reads its options from a file', zh: '会从一个文件里读取选项（包括保存位置）' }
+  // yt-dlp's `TYPE:` prefixes (`-P home:/x`, `-o thumbnail:/x/%(id)s.jpg`) name which file goes there, not the path.
+  const untyped = (value: string | undefined) => (value === undefined ? undefined : value.replace(/^[A-Za-z_]+:(?!\/\/)/, ''))
   const shortValue = (a: string, letters: string): { letter: string; value: string | undefined; attached: boolean } | undefined => {
     const m = new RegExp(`^-([${letters}])(.*)$`).exec(a)
     return m ? { letter: m[1]!, value: m[2] || undefined, attached: !!m[2] } : undefined
+  }
+  const add = (list: string[], value: string | undefined) => {
+    if (value !== undefined && value !== '-') list.push(value)
   }
   for (let k = 0; k < args.length; k++) {
     const a = args[k]!
     if (a === '--') break
     const eq = a.indexOf('=')
     const name = eq > 0 ? a.slice(0, eq) : a
-    const long = (value: string | undefined) => (eq > 0 ? a.slice(eq + 1) : (k++, value))
+    const long = () => (eq > 0 ? a.slice(eq + 1) : args[++k])
     if (head === 'aria2c') {
-      if (name === '--dir') dir = long(args[k + 1])
-      else if (name === '--out') named = long(args[k + 1])
-      else if (name === '--input-file' || name === '--conf-path') unknown ??= { en: 'reads its options from a file', zh: '会从一个文件里读取选项（包括保存位置）' }
+      if (name === '--dir') add(dirs, long())
+      else if (name === '--out') add(named, long())
+      // Files it writes beside the download: its log, its session, cookies, DHT and server stats.
+      else if (/^--(?:log|save-session|save-cookies|dht-file-path6?|server-stat-of)$/.test(name)) add(files, long())
+      else if (name === '--input-file' || name === '--conf-path') unknown ??= fromFile
       else {
-        const s = shortValue(a, 'doi')
-        if (s?.letter === 'd') dir = s.attached ? s.value : args[++k]
-        else if (s?.letter === 'o') named = s.attached ? s.value : args[++k]
-        else if (s?.letter === 'i') unknown ??= { en: 'reads its options from a file', zh: '会从一个文件里读取选项（包括保存位置）' }
+        const s = shortValue(a, 'doil')
+        if (s?.letter === 'd') add(dirs, s.attached ? s.value : args[++k])
+        else if (s?.letter === 'o') add(named, s.attached ? s.value : args[++k])
+        else if (s?.letter === 'l') add(files, s.attached ? s.value : args[++k])
+        else if (s?.letter === 'i') unknown ??= fromFile
       }
     } else if (HTTPIE.has(head)) {
       if (name === '--download' || a === '-d' || (/^-[A-Za-z]+$/.test(a) && a.includes('d') && !a.includes('o'))) download = true
+      else if (name === '--output') add(named, long())
       else if (a === '-o' || /^-[A-Za-z]*o$/.test(a)) {
-        named = args[++k]
+        add(named, args[++k])
         if (/d/.test(a)) download = true
       }
     } else {
       const s = shortValue(a, 'oOPd')
-      if (name === '--paths' || name === '-P') dir = long(args[k + 1])
-      else if (s?.letter === 'P' || s?.letter === 'd') dir = s.attached ? s.value : args[++k]
-      else if (s?.letter === 'o' || s?.letter === 'O') named = s.attached ? s.value : args[++k]
+      if (name === '--paths' || name === '-P') add(dirs, untyped(long()))
+      else if (name === '--output') add(named, untyped(long()))
+      // Files it writes beside the download (cookies are saved back, the archive grows).
+      else if (/^--(?:cookies|download-archive)$/.test(name)) add(files, long())
+      // A command it runs on what it downloads: what that does is not known here.
+      else if (/^--exec(?:-before-download)?$/.test(name)) unknown ??= { en: 'runs a command it is given on what it downloads', zh: '会对下载的内容运行它被指定的命令' }
+      else if (name === '--config-locations' || name === '--batch-file' || name === '-a') unknown ??= fromFile
+      else if (s?.letter === 'P' || s?.letter === 'd') add(dirs, untyped(s.attached ? s.value : args[++k]))
+      else if (s?.letter === 'o' || s?.letter === 'O') add(named, untyped(s.attached ? s.value : args[++k]))
     }
   }
-  if (named !== undefined && named !== '-') files.push(dir !== undefined && !path.isAbsolute(named) && !/^[~$]/.test(named) ? path.join(dir, named) : named)
+  for (const file of named) {
+    if (path.isAbsolute(file) || /^[~$]/.test(file) || dirs.length === 0) files.push(file)
+    else for (const dir of dirs) files.push(path.join(dir, file))
+  }
   const directories: (string | undefined)[] = []
-  if (download && (named === undefined || head !== 'aria2c' && !HTTPIE.has(head))) directories.push(dir)
+  if (download && (named.length === 0 || (head !== 'aria2c' && !HTTPIE.has(head)))) {
+    if (dirs.length) directories.push(...dirs)
+    else directories.push(undefined)
+  }
   return { files, directories, ...(unknown ? { unknown } : {}) }
 }
 
@@ -1270,6 +1382,10 @@ export interface ListeningServer {
   exposed: boolean
   /** Its arguments hold something this cannot read for sure (an unknown option, a variable): it counts as exposed. */
   unsure?: boolean
+  /** Options that change what it runs (php -d/-c/…) or a file it runs that this cannot place: it asks. */
+  unsureRun?: boolean
+  /** Files it runs besides what it serves (php's router script), as written. */
+  runs?: string[]
   /** The directory it serves, when certain (for the card's wording). */
   directory?: string
   /**
@@ -1354,10 +1470,15 @@ function serverOf(name: string, rawArgs: string[], here: string | undefined, her
     given = value
   })
   if (!server) return undefined
-  let directories: string[] | undefined = heres
-  if (given !== undefined) {
-    const known = staticPath(given)
-    directories = known === undefined ? undefined : path.isAbsolute(known) ? [known] : heres?.map((base) => path.resolve(base, known))
+  const place = (value: string): string[] | undefined => {
+    const known = staticPath(value)
+    return known === undefined ? undefined : path.isAbsolute(known) ? [known] : heres?.map((base) => path.resolve(base, known))
+  }
+  let directories: string[] | undefined = given === undefined ? heres : place(given)
+  // A script it runs (php's router) must be placed too: it counts as one more place it serves from.
+  for (const file of server.runs ?? []) {
+    const placed = place(file)
+    directories = placed === undefined || directories === undefined ? undefined : [...directories, ...placed]
   }
   return { ...server, ...(directories ? { directories } : {}) }
 }
@@ -1409,12 +1530,38 @@ function parseServer(name: string, rawArgs: string[], here: string | undefined, 
     return { kind, port, bind, exposed: !sure || !isLoopbackHost(bind), ...(sure ? {} : { unsure: true }), ...(directory ?? here ? { directory: directory ?? here } : {}) }
   }
   if (name === 'php') {
-    const s = args.findIndex((a) => a === '-S' || /^-S./.test(a))
-    if (s < 0) return undefined
-    const { host, port } = hostPort(args[s] === '-S' ? args[s + 1] ?? '' : args[s]!.slice(2))
-    const t = args.findIndex((a) => a === '-t' || /^-t./.test(a))
-    const directory = t < 0 ? here : dirOf(args[t] === '-t' ? args[t + 1] : args[t]!.slice(2))
-    return { kind: 'scripts', port, bind: host, exposed: unsure(host) || !isLoopbackHost(host), ...(unsure(host) ? { unsure: true } : {}), ...(directory ? { directory } : {}) }
+    if (!args.some((a) => a === '-S' || /^-S./.test(a))) return undefined
+    // Only -S, -t and one router script are read; any other option (-d auto_prepend_file=…, -c php.ini,
+    // -n, -z, …) changes what runs: it asks. A second operand is not something php -S takes.
+    let listen = ''
+    let docroot: string | undefined
+    let unsureRun = false
+    const runs: string[] = []
+    for (let k = 0; k < args.length; k++) {
+      const a = args[k]!
+      if (a === '-S') listen = args[++k] ?? ''
+      else if (/^-S./.test(a)) listen = a.slice(2)
+      else if (a === '-t') docroot = args[++k]
+      else if (/^-t./.test(a)) docroot = a.slice(2)
+      else if (/^-[cdzfrBRFE]$/.test(a)) {
+        unsureRun = true
+        k++
+      } else if (a.startsWith('-')) unsureRun = true
+      else if (runs.length === 0) runs.push(a)
+      else unsureRun = true
+    }
+    const { host, port } = hostPort(listen)
+    const directory = docroot === undefined ? here : dirOf(docroot)
+    return {
+      kind: 'scripts',
+      port,
+      bind: host,
+      exposed: unsure(host) || !isLoopbackHost(host),
+      ...(unsure(host) ? { unsure: true } : {}),
+      ...(unsureRun ? { unsureRun: true } : {}),
+      ...(runs.length ? { runs } : {}),
+      ...(directory ? { directory } : {}),
+    }
   }
   const runner = runnerPackage(name, args)
   const program = runner?.name ?? name
@@ -1529,6 +1676,13 @@ function placedCommands(command: string, cwd: string, depth = 0, start: string[]
         out.push(...placedCommands(code, here ?? cwd, depth + 1, heres).map((c) => (here === undefined ? { ...c, here: undefined } : c)))
         continue
       }
+    }
+    // A wrapper's directory change (`env -C`, `sudo -D`) for this command only.
+    const wrapped = afterWrapperChanges(parsed.words, heres)
+    if (wrapped.changed) {
+      const certain = afterWrapperChanges(parsed.words, here === undefined ? undefined : [here]).bases
+      out.push({ parsed, head, args, here: certain?.length === 1 ? certain[0] : undefined, heres: wrapped.bases })
+      continue
     }
     out.push({ parsed, head, args, here, heres })
   }

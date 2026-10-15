@@ -13,7 +13,7 @@ locked card and in Telegram; see artemis-online `docs/APPROVALS.md`).
 |---|---|---|
 | `confirmation` | The agent asks with `request_user_confirmation` | always asks (not configurable) |
 | `shell_high_risk` | `run_command` matching the high-risk classifier (below): remote or hidden code, a command built at run time, data sent out, reverse shells, lock-outs; a web server other machines can reach (medium risk, below); and every `server_setup run` off the read-only allowlist | ask |
-| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, `tee`, `sed -i`, `chmod/chown/chgrp -R`, `cp`/`install`/`ln -f` onto an existing file or into a place whose files run later (login scripts, autostart entries, services, cron, `.ssh`, and command directories the agent can write: `~/bin`, `~/.local/bin`, writable `PATH` entries, where a new file shadows a command), appends `>> file` (a line added to `~/.bashrc` runs later), inline code that opens a file for writing, downloads saved there (`curl -o/--output/-O/--output-dir`, `wget -O/-P` or into the current directory, `aria2c -d/-o`, httpie `--download`/`-o`, `yt-dlp`, `axel`, and any program given `--output`, `--output-dir`, `--out`, …), …, and `delete_file`/`delete_directory`/`move_file`), and any delete or write whose target cannot be worked out | ask |
+| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, `tee`, `sed -i`, `chmod/chown/chgrp -R`, `cp`/`install`/`ln -f` onto an existing file or into a place whose files run later (login scripts, autostart entries, services, cron, `.ssh`, and command directories the agent can write: `~/bin`, `~/.local/bin`, writable `PATH` entries, where a new file shadows a command), appends `>> file` (a line added to `~/.bashrc` runs later), inline code that opens a file for writing, downloads saved there (`curl -o/--output/-O/--output-dir`, `wget -O/-P` or into the current directory, `aria2c -d/-o` and its `--log`/`--save-session`, httpie `--download`/`-o`, `yt-dlp` (`-P`/`-o` with their `TYPE:` prefixes, `--cookies`; `--exec` asks), `axel`, and any program given `--output`, `--output-dir`, `--out`, …), …, and `delete_file`/`delete_directory`/`move_file`), and any delete or write whose target cannot be worked out | ask |
 | `outbound_send` | `bridge_send_*`, external tools that send, post, reply, submit | ask |
 | `payment` | External tools that pay, buy, order, transfer, sign or broadcast a transaction; tools that call `requireApproval('payment', …)` | ask |
 | `publish` | External tools that publish, share, deploy; tools that call `requireApproval('publish', …)` | ask |
@@ -69,7 +69,13 @@ on a shared host (other programs and users on the machine reach it), so a
 loopback server of anything else (`--directory /home`, `-t /home`, a `cd
 /etc` before it, a directory not known before it runs) asks as
 `shell_high_risk`, medium risk, and one that runs what it serves (`php -S`,
-`http.server --cgi`) runs freely only on the workspace. Bound anywhere
+`http.server --cgi`) runs freely only on the workspace; `php -S` with any
+option but `-S`/`-t` (`-d auto_prepend_file=…`, `-c php.ini`, `-n`, …)
+asks, and its router script must be in the workspace too. A wrapper's
+directory change (`env -C DIR`, `env --chdir=DIR`, `sudo -D DIR`, `sudo
+--chdir DIR`) is followed for the command it runs, for servers and for
+deletes and writes alike (an unknown one makes the directory unknown).
+Bound anywhere
 else, or by default (python's http.server binds every interface unless told
 otherwise), or with an option or a variable the classifier cannot read, it
 asks as `shell_high_risk` with **medium** risk ("a web server other
@@ -84,6 +90,14 @@ a place not known before it runs makes relative targets unknown. The
 temp dir (`$TMPDIR`, `/tmp`, `/var/tmp`, after following links) counts as
 the agent's scratch space: a new log there (`> /tmp/x.log 2>&1`) needs
 nothing.
+
+**Pages in the browser.** `browser_navigate` opens a page the agent built
+with `path` (inside the workspace, a folder opening its `index.html`), and
+a `file://` URL (also behind `view-source:`, and for `browser_tabs` new
+tabs) is held to the same rules: the file that would open is resolved
+through every link, must be inside the workspace and outside the
+protected directories (`agent-credentials`, `vpn-profiles`), and that
+real path is what opens. Other URLs are not affected.
 
 **What the card says.** The title and summary come from what the command
 was classified as doing (`summarizeShellCommand`): "启动本地预览：在本机
