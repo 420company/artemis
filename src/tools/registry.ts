@@ -56,6 +56,7 @@ import {
   validateNotebookAddTagAction,
   validateNotebookRemoveTagAction,
   validateNotebookTreeAction,
+  isExtraActionType,
 } from './extras-validators.js';
 import {
   ALL_AGENT_ACTION_TYPES,
@@ -2940,6 +2941,14 @@ export function isToolAvailableForProvider(toolType: string): boolean {
   }
 
   if (PROVIDER_EXCLUDED_ACTION_TYPES.has(toolType as AgentActionType)) {
+    return false;
+  }
+
+  // The extras (file ops, git, text, network and dev helpers) run on the
+  // interactive direct-tool path (brain.ts), which validates them and asks
+  // for approvals. No agent profile offers them, so they are not provider
+  // tools of the agent loop either.
+  if (isExtraActionType(toolType)) {
     return false;
   }
 
