@@ -65,3 +65,26 @@ jobs:
         env:
           READ_DOCUMENT_REQUIRE_POPPLER: '1'
         run: npm run test:readDocument
+
+  regressions:
+    name: System, tool safety and user-visible text
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install ffmpeg (speech and timeline checks)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: npm ci
+      - name: System smoke (CLI, execute against a mock endpoint)
+        run: npm run test:system
+      - name: Tool safety (wallet, extras, approvals, manifest, timeline, STT, retry, MCP)
+        run: npm run test:toolSafety
+      - name: No internal names, fee wording or config keys in user-visible text
+        run: npm run test:internalNames
+      - name: Workflow router
+        run: npm run test:workflowRouter
+      - name: Speech
+        run: npm run test:speech
