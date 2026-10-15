@@ -38,7 +38,7 @@ import type { AgentAction, SessionRecord } from '../core/types.js'
 import type { ToolError } from '../tools/types.js'
 import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
 import { isSyntheticUserMessage } from '../core/compaction/language.js'
-import { analyzeDeletes, describeHighRiskCommand, DESTRUCTIVE_TOKEN, isInsideWorkspace, isTemporaryPath, readOnlyServerCommand } from './shellRisk.js'
+import { analyzeDeletes, describeHighRiskCommand, DESTRUCTIVE_TOKEN, isInsideWorkspace, isTemporaryPath, listeningServers, readOnlyServerCommand, summarizeShellCommand, type DeleteAnalysis } from './shellRisk.js'
 
 // ── Kinds, modes, policy ────────────────────────────────────────────────────
 
@@ -569,12 +569,15 @@ export interface ApprovalNeed {
   /** Overrides the generated title / summary (a tool's own wording, or the model's question). */
   title?: string
   summary?: string
+  /** The classifier's own wording, in both languages (what a shell command was classified as doing). */
+  wording?: { zh: { title: string; summary: string }; en: { title: string; summary: string } }
 }
 
 export function describeApprovalNeed(need: ApprovalNeed, locale: UiLocale): { title: string; summary: string } {
   const d = need.details
   const money = d.amount ? `${d.amount}${d.currency ? ` ${d.currency}` : ''}${d.quantity ? ` × ${d.quantity}` : ''}` : ''
   const generated = ((): { title: string; summary: string } => {
+    if (need.wording) return locale === 'en' ? need.wording.en : need.wording.zh
     switch (need.kind) {
       case 'confirmation':
         return { title: t(locale, '需要你确认', 'Your confirmation is needed'), summary: d.question ?? '' }
@@ -775,12 +778,24 @@ export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext):
       if (dangerous) {
         return need('shell_high_risk', 'high', { command: action.command, reason: dangerous.reason, reasonZh: dangerous.reasonZh, paths: deletes.outside.join(', ') || undefined })
       }
+      const summary = summarizeShellCommand(action.command, ctx.cwd)
       if (deletes.outside.length || deletes.unverifiable) {
         return need('delete_outside_workspace', 'high', {
           command: action.command,
           paths: deletes.outside.join(', ') || undefined,
           ...(deletes.unverifiable ? { unverifiable: deletes.unverifiable } : {}),
-        })
+        }, { wording: outsideChangeWording(deletes, summary) })
+      }
+      // A web server other machines can reach (python -m http.server binds every interface unless told otherwise).
+      const exposed = listeningServers(action.command, ctx.cwd).filter((server) => server.exposed)
+      if (exposed.length) {
+        const ports = [...new Set(exposed.map((server) => server.port))].join(', ')
+        return need(
+          'shell_high_risk',
+          'medium',
+          { command: action.command, reason: `starts a web server on port ${ports} that other machines may reach`, reasonZh: `会在端口 ${ports} 上启动一个其他机器也可能访问到的网页服务` },
+          { wording: exposedServerWording(ports, summary) },
+        )
       }
       return null
     }
@@ -889,6 +904,60 @@ export function classifyApprovalNeed(action: AgentAction, ctx: ClassifyContext):
         : null
     default:
       return null
+  }
+}
+
+/**
+ * The card for a command that changes files outside the workspace, worded
+ * from what it was classified as doing: deleting, writing, or (when its
+ * targets cannot be worked out) a neutral line that claims neither.
+ */
+function outsideChangeWording(deletes: DeleteAnalysis, summary: { zh: string; en: string } | undefined): NonNullable<ApprovalNeed['wording']> {
+  const paths = deletes.outside.join(', ')
+  const lead = summary ? { zh: `${summary.zh}`, en: `${summary.en} ` } : { zh: '', en: '' }
+  if (deletes.unverifiable) {
+    const why = deletes.unverifiableZh ?? '它的目标要到运行时才知道'
+    const affects = paths ? { zh: `（涉及：${clip(paths, 160)}）`, en: ` (affects: ${clip(paths, 160)})` } : { zh: '', en: '' }
+    // What it does is known (rm, a write), only not where: say that much. Otherwise claim neither.
+    const known = deletes.removes && !deletes.writes ? 'remove' : deletes.writes && !deletes.removes ? 'write' : undefined
+    const zhTitle = known === 'remove' ? '删除文件（位置无法事先确定）' : known === 'write' ? '写入文件（位置无法事先确定）' : '运行一条需要你确认的命令'
+    const enTitle = known === 'remove' ? 'Delete files (where cannot be known beforehand)' : known === 'write' ? 'Write files (where cannot be known beforehand)' : 'Run a command that needs your confirmation'
+    const zhWhat = known === 'remove' ? '这条命令会删除文件' : known === 'write' ? '这条命令会写入文件' : '这条命令可能会删除或改写文件'
+    const enWhat = known === 'remove' ? 'This command deletes files' : known === 'write' ? 'This command writes files' : 'This command may delete or overwrite files'
+    return {
+      zh: { title: zhTitle, summary: `${lead.zh}${zhWhat}，但${why}，无法事先确定具体是哪些${affects.zh}。只有你同意后才会运行。` },
+      en: { title: enTitle, summary: `${lead.en}${enWhat}, and which ones cannot be known beforehand (${deletes.unverifiable})${affects.en}. It runs only if you approve.` },
+    }
+  }
+  const removes = deletes.removes === true
+  const writes = deletes.writes === true || !removes
+  const title = removes && writes
+    ? { zh: '删除或改写工作区以外的文件', en: 'Delete or overwrite files outside the workspace' }
+    : removes
+      ? { zh: '删除工作区以外的文件', en: 'Delete files outside the workspace' }
+      : { zh: '写入工作区以外的文件', en: 'Write files outside the workspace' }
+  const effect = removes && writes
+    ? { zh: '删除或覆盖后无法恢复。', en: 'This cannot be undone.' }
+    : removes
+      ? { zh: '删除后无法恢复。', en: 'Once deleted they cannot be restored.' }
+      : { zh: '如果文件已经存在，原来的内容会被覆盖，无法恢复。', en: 'If a file already exists, what it held is replaced and cannot be restored.' }
+  return {
+    zh: { title: title.zh, summary: `${lead.zh}涉及：${clip(paths, 160)}。${effect.zh}只有你同意后才会运行。` },
+    en: { title: title.en, summary: `${lead.en}Affects: ${clip(paths, 160)}. ${effect.en} It runs only if you approve.` },
+  }
+}
+
+/** The card for a command that starts a web server other machines may reach. */
+function exposedServerWording(ports: string, summary: { zh: string; en: string } | undefined): NonNullable<ApprovalNeed['wording']> {
+  return {
+    zh: {
+      title: '启动一个其他机器也能访问的网页服务',
+      summary: `${summary?.zh ?? `这条命令会在端口 ${ports} 上启动网页服务，没有限定只给本机使用。`}只想自己预览的话，可以只绑定到 127.0.0.1。只有你同意后才会运行。`,
+    },
+    en: {
+      title: 'Start a web server other machines can reach',
+      summary: `${summary ? `${summary.en} ` : `This command starts a web server on port ${ports} that is not limited to this machine. `}To preview it only here, bind it to 127.0.0.1. It runs only if you approve.`,
+    },
   }
 }
 

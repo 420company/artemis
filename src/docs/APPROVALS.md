@@ -12,8 +12,8 @@ locked card and in Telegram; see artemis-online `docs/APPROVALS.md`).
 | Kind | When | Default |
 |---|---|---|
 | `confirmation` | The agent asks with `request_user_confirmation` | always asks (not configurable) |
-| `shell_high_risk` | `run_command` matching the high-risk classifier (below): remote or hidden code, a command built at run time, data sent out, reverse shells, lock-outs; and every `server_setup run` off the read-only allowlist | ask |
-| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, `tee`, `sed -i`, `chmod/chown/chgrp -R`, `cp`/`install`/`ln -f` onto an existing file or into a place whose files run later (login scripts, autostart entries, services, cron, `.ssh`, and command directories the agent can write: `~/bin`, `~/.local/bin`, writable `PATH` entries, where a new file shadows a command), appends `>> file` (a line added to `~/.bashrc` runs later), inline code that opens a file for writing, …, and `delete_file`/`delete_directory`/`move_file`), and any delete or write whose target cannot be worked out | ask |
+| `shell_high_risk` | `run_command` matching the high-risk classifier (below): remote or hidden code, a command built at run time, data sent out, reverse shells, lock-outs; a web server other machines can reach (medium risk, below); and every `server_setup run` off the read-only allowlist | ask |
+| `delete_outside_workspace` | Deleting, moving away or overwriting anything outside the workspace (`rm`, `find -delete/-exec`, `mv`, `> file`, `truncate`, `dd of=`, `git clean`, `rsync --delete`, `tee`, `sed -i`, `chmod/chown/chgrp -R`, `cp`/`install`/`ln -f` onto an existing file or into a place whose files run later (login scripts, autostart entries, services, cron, `.ssh`, and command directories the agent can write: `~/bin`, `~/.local/bin`, writable `PATH` entries, where a new file shadows a command), appends `>> file` (a line added to `~/.bashrc` runs later), inline code that opens a file for writing, downloads saved there (`curl -o/--output/-O/--output-dir`, `wget -O/-P` or into the current directory), …, and `delete_file`/`delete_directory`/`move_file`), and any delete or write whose target cannot be worked out | ask |
 | `outbound_send` | `bridge_send_*`, external tools that send, post, reply, submit | ask |
 | `payment` | External tools that pay, buy, order, transfer, sign or broadcast a transaction; tools that call `requireApproval('payment', …)` | ask |
 | `publish` | External tools that publish, share, deploy; tools that call `requireApproval('publish', …)` | ask |
@@ -58,6 +58,36 @@ content is.
   formatting or partitioning disks, shutdown and reboot.
 Here-document bodies are text, not commands: a body written to a file is
 not classified, a body that is a program is checked as inline code.
+
+**Web servers** (`listeningServers`): a known static or script server
+(`python -m http.server` / `SimpleHTTPServer`, `php -S`, `http-server`,
+`serve`, `busybox httpd`, also through `nohup`, `setsid`, `npx` or `sh -c`)
+bound only to the loopback interface (`--bind 127.0.0.1`, `-b ::1`,
+`localhost`) needs nothing: only this machine reaches it. Bound anywhere
+else, or by default (python's http.server binds every interface unless told
+otherwise), or with an option or a variable the classifier cannot read, it
+asks as `shell_high_risk` with **medium** risk ("a web server other
+machines may reach"). A server the classifier does not know is not
+classified (it is code like any other).
+
+**Directories.** A `cd` to a static path is followed. A subshell (`(cd x
+&& …)`), `cd -`, `popd` or a cd that fails puts the shell back where it
+was, so a relative target must be fine from every directory the command
+may be in at that point (the start and every static cd before it); a cd to
+a place not known before it runs makes relative targets unknown. The
+temp dir (`$TMPDIR`, `/tmp`, `/var/tmp`, after following links) counts as
+the agent's scratch space: a new log there (`> /tmp/x.log 2>&1`) needs
+nothing.
+
+**What the card says.** The title and summary come from what the command
+was classified as doing (`summarizeShellCommand`): "启动本地预览：在本机
+127.0.0.1:8731 打开工作区 sites/x 里的网页（只有 agent 自己能访问）", "把输出写进
+新的临时文件 /tmp/x.log", "检查本机网页 … 能否打开", "把 … 下载到 …", a write
+or a delete outside the workspace with its paths. A delete is only called a
+delete when the command removes something (`rm`, `find -delete`, `mv`
+away); a write is called a write. When the targets cannot be worked out the
+card says what is known ("删除文件（位置无法事先确定）"), and when nothing is,
+it is neutral ("运行一条需要你确认的命令") and claims no deletion.
 
 **Commands on a server (`server_setup run`).** The agent is root on the
 owner's server, so a command there asks unless it is on a short allowlist

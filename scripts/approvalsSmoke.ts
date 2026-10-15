@@ -981,6 +981,113 @@ async function suspendOnce(name: string, options: { hostBinding?: string; ttlMin
   assert('vpn script: wg0.conf is no longer an expanding here-document', !/cat > \/etc\/wireguard\/wg0\.conf <<CONF_EOF/.test(script) && /printf '\[Interface\]/.test(script) && script.includes(`'10.66.66.1/24'`))
 }
 
+// ── Approval wording: a local preview, a log in the temp dir, a check of the page ──
+{
+  const cwd = workspace('preview')
+  const site = path.join(cwd, 'sites', 'guihua-latte-poster')
+  fs.mkdirSync(site, { recursive: true })
+  fs.writeFileSync(path.join(site, 'index.html'), '<!doctype html><title>poster</title>')
+  const classify = (command: string) => classifyApprovalNeed({ type: 'run_command', command }, { cwd, dangerousCommand: describeDangerousCommand })
+  const kind = (command: string) => classify(command)?.kind ?? null
+  const card = (command: string, locale: 'zh-CN' | 'en' = 'zh-CN') => {
+    const found = classify(command)
+    return found ? describeNeed(found, locale) : undefined
+  }
+  const freshLog = path.join(os.tmpdir(), `apr-preview-${process.pid}.log`)
+  fs.rmSync(freshLog, { force: true })
+  // The command the owner saw: python's http.server binds every interface unless told otherwise.
+  const seen = `cd ${site} && (nohup python3 -m http.server 8731 >/tmp/poster_server.log 2>&1 & echo $!) && sleep 1 && curl -sS -o /dev/null -w "%{http_code}\\n" http://127.0.0.1:8731/index.html`
+  const seenNeed = classify(seen)
+  const seenCard = card(seen)
+  assert('preview: the reported command is not a delete outside the workspace', seenNeed?.kind === 'shell_high_risk' && seenNeed.risk === 'medium', JSON.stringify(seenNeed))
+  assert('preview: its card says what it does (a web server on 8731 others may reach, a temp log, a check of the page)',
+    !!seenCard && seenCard.title === '启动一个其他机器也能访问的网页服务' && seenCard.summary.includes('在端口 8731 上提供工作区 sites/guihua-latte-poster 里的网页') &&
+      seenCard.summary.includes('所有网络接口') && seenCard.summary.includes('临时文件 /tmp/poster_server.log') && seenCard.summary.includes('检查本机网页 http://127.0.0.1:8731/index.html 能否打开') &&
+      !/删除/.test(seenCard.title + seenCard.summary), JSON.stringify(seenCard))
+  assert('preview: the card in English too', /^Start a web server other machines can reach$/.test(card(seen, 'en')?.title ?? '') && /temporary file \/tmp\/poster_server\.log/.test(card(seen, 'en')?.summary ?? ''))
+  // The same preview bound to this machine only needs nothing.
+  const local: [string, string][] = [
+    [seen.replace('http.server 8731', 'http.server 8731 --bind 127.0.0.1'), 'the reported command bound to 127.0.0.1'],
+    [`cd ${site} && (nohup python3 -m http.server --bind 127.0.0.1 8731 >${freshLog} 2>&1 &) && sleep 1 && curl -s http://127.0.0.1:8731/`, 'bind before the port, a new log in the temp dir'],
+    [`cd ${site} && nohup python3 -m http.server 8731 -b 127.0.0.1 > /tmp/poster_server.log 2>&1 &`, '-b, no subshell'],
+    [`python3 -m http.server 8731 --bind=::1 --directory sites/guihua-latte-poster >> /tmp/poster_server.log 2>&1 &`, '--bind=::1 and --directory, an append to a temp log'],
+    [`cd sites/guihua-latte-poster && setsid python3 -m http.server 8731 --bind localhost &>/tmp/poster_server.log & sleep 1; curl -sSf http://localhost:8731/index.html -o /dev/null`, 'setsid, localhost, &>'],
+    [`(cd ${site} && exec python3 -u -m http.server 8731 --bind 127.0.0.1) > ${path.join(os.tmpdir(), 'poster.log')} 2>&1 &`, 'the whole subshell redirected into the temp dir'],
+    [`nohup npx -y http-server sites/guihua-latte-poster -p 8731 -a 127.0.0.1 -c-1 > /tmp/h.log 2>&1 &`, 'http-server on 127.0.0.1'],
+    [`php -S 127.0.0.1:8731 -t sites/guihua-latte-poster > /tmp/php.log 2>&1 &`, 'php -S on 127.0.0.1'],
+    ['curl -sS http://127.0.0.1:8731/index.html -o /tmp/page.html', 'a page of this machine saved into the temp dir'],
+    ['curl -sS -o /dev/null -w "%{http_code}" http://localhost:8731/', 'a status check of this machine'],
+    ['wget -qO- http://127.0.0.1:8731/ | head -5', 'wget to stdout'],
+    [`curl -sSo ${path.join(os.tmpdir(), 'a.html')} https://example.com/`, 'an outside page saved into the temp dir'],
+    ['curl -sS -O https://example.com/a.png', 'a download into the workspace under its remote name'],
+  ]
+  for (const [command, why] of local) assert(`preview: ${why} needs nothing — ${command}`, kind(command) === null, JSON.stringify(classify(command)))
+  // The example wording: a local preview, shown when the same command also writes outside.
+  const withOutside = `cd ${site} && (nohup python3 -m http.server 8731 --bind 127.0.0.1 > /var/log/poster.log 2>&1 &)`
+  const outsideCard = card(withOutside)
+  assert('preview: a local preview whose log goes outside asks as a write outside, worded from what it does',
+    classify(withOutside)?.kind === 'delete_outside_workspace' && classify(withOutside)?.risk === 'high' && outsideCard?.title === '写入工作区以外的文件' &&
+      outsideCard.summary.includes('启动本地预览：在本机 127.0.0.1:8731 打开工作区 sites/guihua-latte-poster 里的网页（只有 agent 自己能访问）') && outsideCard.summary.includes('/var/log/poster.log'),
+    JSON.stringify(outsideCard))
+  // Safety is not weakened: other machines, outside paths, deletes still ask.
+  const exposed: [string, string][] = [
+    ['python3 -m http.server --bind 0.0.0.0 8000', '--bind 0.0.0.0'],
+    ['python3 -m http.server 8000', 'the default (every interface)'],
+    ['python3 -m http.server 8000 --bind ::', '--bind ::'],
+    ['python3 -m http.server 8000 --bind 192.168.1.5', 'a LAN address'],
+    ['python3 -m http.server 8000 --bind 127.0.0.1 --whatever', 'an option it cannot read'],
+    ['python3 -m http.server --bind "$HOST" 8000', 'a bind address from a variable'],
+    ['python2 -m SimpleHTTPServer 8000', 'SimpleHTTPServer (no bind option)'],
+    ['bash -c "python3 -m http.server 9000"', 'inside bash -c'],
+    ['npx serve sites/guihua-latte-poster', 'serve (every interface by default)'],
+    ['npx http-server sites/guihua-latte-poster -p 8080', 'http-server (0.0.0.0 by default)'],
+    ['php -S 0.0.0.0:8000', 'php -S on 0.0.0.0'],
+    ['busybox httpd -f -p 8080 -h sites/guihua-latte-poster', 'busybox httpd'],
+  ]
+  for (const [command, why] of exposed) {
+    const found = classify(command)
+    assert(`preview: a server others may reach asks (at least medium) — ${why}: ${command}`, found?.kind === 'shell_high_risk' && (found.risk === 'medium' || found.risk === 'high'), JSON.stringify(found))
+  }
+  const outside: [string, string][] = [
+    ['echo x > /etc/x', '> /etc/x'],
+    [`cd ${site} && (nohup python3 -m http.server 8731 --bind 127.0.0.1 > /etc/x 2>&1 &)`, 'a local preview logging into /etc'],
+    ['rm -rf /tmp/*', 'rm -rf /tmp/*'],
+    ['rm -f /usr/share/doc/x', 'rm outside'],
+    [`cd ${site} && (nohup python3 -m http.server 8731 --bind 127.0.0.1 > /tmp/x.log 2>&1 &) && rm -rf /usr/share/doc`, 'a local preview with an rm outside'],
+    ['echo x > /home/someone-else/notes.txt', 'writing into another user\'s directory'],
+    ['echo x | tee /home/someone-else/.profile', 'tee into another user\'s directory'],
+    ['curl -sS -o /etc/x https://example.com/a', 'curl -o outside'],
+    ['curl -sSo /srv/www/x https://example.com/a', 'curl -sSo outside'],
+    ['curl --output=/srv/www/x https://example.com/a', 'curl --output= outside'],
+    ['curl --output-dir /srv/www -O https://example.com/a', 'curl --output-dir outside'],
+    ['curl -o "$OUT" https://example.com/a', 'curl -o a variable'],
+    ['curl -K opts.txt https://example.com/a', 'curl options read from a file'],
+    ['cd /usr/share && curl -O https://example.com/a', 'curl -O after a cd outside'],
+    ['wget -O /etc/x https://example.com/a', 'wget -O outside'],
+    ['wget -P /srv/www https://example.com/a', 'wget -P outside'],
+    ['cd /usr/share && wget -q https://example.com/a', 'wget into a directory outside'],
+    // A subshell's cd does not leak, and a cd that is undone (subshell, cd -, popd) is not forgotten either.
+    [`cd /usr/share && (cd ${cwd}) ; rm -rf doc`, 'rm after a subshell that went back to the workspace'],
+    ['(cd /usr/share && rm -rf doc)', 'rm inside a subshell outside'],
+    [`cd /usr/share; cd ${cwd}; cd -; rm -rf doc`, 'cd - back outside'],
+    [`pushd /usr/share; pushd ${cwd}; popd; rm -rf doc`, 'popd back outside'],
+  ]
+  if (!isTemporaryPath(os.homedir())) outside.push(['curl -o ~/.bashrc https://example.com/a', 'curl -o onto a login script'])
+  for (const [command, why] of outside) {
+    const found = classify(command)
+    assert(`preview: ${why} still asks (high) — ${command}`, (found?.kind === 'delete_outside_workspace' || found?.kind === 'shell_high_risk') && found.risk === 'high', JSON.stringify(found))
+  }
+  assert('preview: a subshell inside the workspace with a cd needs nothing', kind(`cd ${path.join(cwd, 'sites')} && (cd guihua-latte-poster && rm -rf old) && rm -rf build`) === null)
+  // Wording: what is known is said, and nothing is claimed that is not.
+  assert('preview: a write outside is called a write', card('echo x > /etc/x')?.title === '写入工作区以外的文件' && card('echo x > /etc/x')!.summary.includes('/etc/x'))
+  assert('preview: an rm outside is called a delete', card('rm -f /usr/share/doc/x')?.title === '删除工作区以外的文件')
+  assert('preview: an rm whose targets are a glob is a delete whose files are not known', card('rm -rf /tmp/*')?.title === '删除文件（位置无法事先确定）' && card('rm -rf /tmp/*')!.summary.includes('/tmp/*'), JSON.stringify(card('rm -rf /tmp/*')))
+  const neutral = card('python3 -c "open(p, \'w\')"')
+  assert('preview: a command it cannot summarise gets a neutral card that claims no deletion', neutral?.title === '运行一条需要你确认的命令' && !/删除了|会删除工作区/.test(neutral.summary), JSON.stringify(neutral))
+  assert('preview: the English neutral card', card('python3 -c "open(p, \'w\')"', 'en')?.title === 'Run a command that needs your confirmation')
+  fs.rmSync(freshLog, { force: true })
+}
+
 // ── Review round 4: appends that run later, commands run through options ──
 {
   const cwd = workspace('round4')

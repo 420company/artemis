@@ -792,6 +792,11 @@ export interface DeleteAnalysis {
   outside: string[]
   /** Why the target cannot be known for certain (fail-closed), if so. */
   unverifiable?: string
+  /** The same reason in the owner's words (Chinese), for the approval card. */
+  unverifiableZh?: string
+  /** What happens to the outside targets: removed (rm, find -delete, mv away) and/or written (redirects, tee, cp onto, downloads). */
+  removes?: boolean
+  writes?: boolean
 }
 
 /** Files a redirect writes: `> f`, `: > f`, and appends `>> f` (a line added to ~/.bashrc runs later); not `2>&1`. */
@@ -829,69 +834,106 @@ export function withoutHeredocBodies(command: string): string {
 export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis {
   const outside = new Set<string>()
   let unverifiable: string | undefined
+  let unverifiableZh: string | undefined
+  let removes = false
+  let writes = false
   // Here-document bodies are text; a program read from one is checked as inline code below.
   const command = withoutHeredocBodies(fullCommand)
   const destructive = DESTRUCTIVE_TOKEN.test(command)
-  const flag = (why: string) => {
-    unverifiable ??= why
+  const flag = (why: string, whyZh: string) => {
+    if (unverifiable !== undefined) return
+    unverifiable = why
+    unverifiableZh = whyZh
   }
-  // The directory each part runs in: `cd <static path>` is followed, anything else is not knowable.
-  let here = cwd
+  /** What the check being made does to its target: decides the card's wording, never whether it asks. */
+  let operation: 'remove' | 'write' = 'write'
+  const addOutside = (target: string) => {
+    outside.add(target)
+    if (operation === 'remove') removes = true
+    else writes = true
+  }
+  // The directories each part may run in. `cd <static path>` adds the
+  // directory it leads to, without dropping the ones before it: a subshell
+  // (`(cd x && …)`), `popd`, `cd -` or a cd that fails puts the shell back in
+  // an earlier one, so a relative target must be fine from every candidate.
+  // A cd to a place not known before it runs makes relative targets unknown.
+  let heres = [cwd]
   let hereUnknown = false
-  const check = (raw: string, allowSinks = false, base = here) => {
+  const MAX_DIRECTORIES = 32
+  const check = (raw: string, allowSinks = false, bases: string[] = heres) => {
     const resolvedWord = staticPath(raw)
     if (resolvedWord === undefined) {
-      flag('target not known before it runs')
-      outside.add(raw)
+      flag('target not known before it runs', '目标要到运行时才知道')
+      addOutside(raw)
       return
     }
-    const absolute = path.resolve(base, resolvedWord)
-    if (allowSinks && HARMLESS_SINKS.has(absolute)) return
-    if (isInsideWorkspace(cwd, absolute)) return
-    if (isTemporaryPath(absolute)) return
-    outside.add(resolvedWord)
+    for (const base of path.isAbsolute(resolvedWord) ? [cwd] : bases) {
+      const absolute = path.resolve(base, resolvedWord)
+      if (allowSinks && HARMLESS_SINKS.has(absolute)) continue
+      if (isInsideWorkspace(cwd, absolute)) continue
+      if (isTemporaryPath(absolute)) continue
+      addOutside(path.isAbsolute(resolvedWord) || base === cwd ? resolvedWord : absolute)
+    }
   }
   /** A file a command writes (tee, sed -i, chmod -R, …): outside the workspace asks; after an unknown cd, a relative one cannot be known. */
-  const checkWrite = (raw: string) => {
+  const checkWrite = (raw: string, allowSinks = false) => {
     const known = staticPath(raw)
     if (known !== undefined && !path.isAbsolute(known) && hereUnknown) {
-      flag('writes a relative path after changing to a directory not known before it runs')
-      outside.add(raw)
+      flag('writes a relative path after changing to a directory not known before it runs', '先切换到一个运行时才知道的目录，再写入相对路径')
+      addOutside(raw)
       return
     }
-    check(raw)
+    check(raw, allowSinks)
   }
   /** cp / install / ln -f onto `destination`: asks when it replaces something that exists outside the workspace. */
   const checkCopy = (destination: string, sources: string[]) => {
     const known = staticPath(destination)
     if (known === undefined || (!path.isAbsolute(known) && hereUnknown)) {
-      flag('copies onto a path not known before it runs')
-      outside.add(destination)
+      flag('copies onto a path not known before it runs', '会复制到一个运行时才知道的位置')
+      addOutside(destination)
       return
     }
-    const absolute = path.resolve(here, known)
-    if (isInsideWorkspace(cwd, absolute) || isTemporaryPath(absolute) || HARMLESS_SINKS.has(absolute)) return
-    let isDirectory = false
-    try {
-      isDirectory = statSync(absolute).isDirectory()
-    } catch {
-      // A new file where something runs later (a login script, an autostart entry, a unit, a
-      // command in a PATH directory the agent can write: `cp x ~/bin/ls`) asks too.
-      if (isStartupPath(absolute) || isStartupPath(`${absolute}/`)) outside.add(known)
+    for (const base of path.isAbsolute(known) ? [cwd] : heres) {
+      const absolute = path.resolve(base, known)
+      const shown = path.isAbsolute(known) || base === cwd ? known : absolute
+      if (isInsideWorkspace(cwd, absolute) || isTemporaryPath(absolute) || HARMLESS_SINKS.has(absolute)) continue
+      let isDirectory = false
+      try {
+        isDirectory = statSync(absolute).isDirectory()
+      } catch {
+        // A new file where something runs later (a login script, an autostart entry, a unit, a
+        // command in a PATH directory the agent can write: `cp x ~/bin/ls`) asks too.
+        if (isStartupPath(absolute) || isStartupPath(`${absolute}/`)) addOutside(shown)
+        continue
+      }
+      if (isDirectory && isStartupPath(`${absolute}/`)) {
+        addOutside(shown)
+        continue
+      }
+      if (!isDirectory) {
+        addOutside(shown)
+        continue
+      }
+      for (const source of sources) {
+        const name = path.basename(staticPath(source) ?? source)
+        if (existsSync(path.join(absolute, name))) addOutside(path.join(shown, name))
+      }
+    }
+  }
+  /** A download saved under its remote name into `directory` (curl -O, wget without -O): the directory must be fine. */
+  const checkSaveInto = (directory: string | undefined) => {
+    if (directory === undefined) {
+      if (hereUnknown) {
+        flag('saves a download after changing to a directory not known before it runs', '先切换到一个运行时才知道的目录，再把下载的文件存进去')
+        addOutside('.')
+        return
+      }
+      for (const base of heres) {
+        if (!isInsideWorkspace(cwd, base) && !isTemporaryPath(base)) addOutside(`${base}/`)
+      }
       return
     }
-    if (isDirectory && isStartupPath(`${absolute}/`)) {
-      outside.add(known)
-      return
-    }
-    if (!isDirectory) {
-      outside.add(known)
-      return
-    }
-    for (const source of sources) {
-      const name = path.basename(staticPath(source) ?? source)
-      if (existsSync(path.join(absolute, name))) outside.add(path.join(known, name))
-    }
+    checkWrite(directory.endsWith('/') ? directory : `${directory}/`)
   }
   /** Inline code that writes files: literal targets are checked, anything else cannot be known. */
   const checkInlineCode = (code: string) => {
@@ -900,19 +942,18 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
       for (const match of code.matchAll(pattern)) check(match[2]!)
       rest = rest.replace(pattern, '')
     }
-    if (DESTRUCTIVE_TOKEN.test(rest)) flag('inline code that deletes or overwrites files')
+    if (DESTRUCTIVE_TOKEN.test(rest)) flag('inline code that deletes or overwrites files', '内嵌的代码会删除或改写文件')
   }
 
   if (destructive) {
-    // Anything that hides where the command really acts.
-    if (/(?:^|[;&|(\s])popd(?:\s|$)/.test(command) || (/[()]/.test(command) && /(?:^|[;&|(\s])(?:cd|pushd)(?:\s|$)/.test(command))) flag('changes directory')
-    if (/\$\(|`|\$\{?[A-Za-z_]/.test(command.replace(/\$\{HOME\}|\$HOME\b/g, ''))) flag('uses variables or command substitution')
-    if (/\{[^{}\s]*,[^{}]*\}|\{[^{}\s]*\.\.[^{}\s]*\}/.test(command)) flag('uses brace expansion')
-    if (/(?:^|\s)~[A-Za-z_]/.test(command)) flag('names another user\'s home')
-    if (/\beval\b/.test(command)) flag('uses eval')
-    if (/\bxargs\b/.test(command)) flag('passes names through xargs')
+    // Anything that hides where the command really acts. (A cd is followed: see `heres`.)
+    if (/\$\(|`|\$\{?[A-Za-z_]/.test(command.replace(/\$\{HOME\}|\$HOME\b/g, ''))) flag('uses variables or command substitution', '用到了变量或命令替换')
+    if (/\{[^{}\s]*,[^{}]*\}|\{[^{}\s]*\.\.[^{}\s]*\}/.test(command)) flag('uses brace expansion', '用到了花括号展开')
+    if (/(?:^|\s)~[A-Za-z_]/.test(command)) flag('names another user\'s home', '涉及其他用户的主目录')
+    if (/\beval\b/.test(command)) flag('uses eval', '用到了 eval')
+    if (/\bxargs\b/.test(command)) flag('passes names through xargs', '通过 xargs 传递文件名')
     // A function body runs later, with arguments not known here.
-    if (/(?:^|[\s;&|(])(?:function\s+[A-Za-z_][\w-]*|[A-Za-z_][\w-]*\s*\(\s*\))\s*\{/.test(command)) flag('defines a function that deletes or overwrites files')
+    if (/(?:^|[\s;&|(])(?:function\s+[A-Za-z_][\w-]*|[A-Za-z_][\w-]*\s*\(\s*\))\s*\{/.test(command)) flag('defines a function that deletes or overwrites files', '定义了一个会删除或改写文件的函数')
   }
 
   for (const parsed of shellCommands(fullCommand)) {
@@ -923,26 +964,37 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
     const plain = withoutRedirections(args)
     // The segment's own words, without its redirections (those are checked on their own below).
     const segmentText = segment.filter((w, k) => !/^\d*>>?$|^\d*>>?[^>&]/.test(w) && !/^\d*>>?$/.test(segment[k - 1] ?? '')).join(' ')
+    operation = 'write'
     if (head === 'cd' || head === 'pushd') {
-      const target = args.find((a) => !a.startsWith('-'))
+      const target = args.find((a) => !a.startsWith('-') || a === '-')
+      // `cd -` and `pushd` with no directory go back to a directory already among the candidates.
+      if (target === '-' || (head === 'pushd' && target === undefined)) continue
       const known = target === undefined ? homedir() : staticPath(target)
       if (known === undefined) {
-        if (destructive) flag('changes to a directory not known before it runs')
+        if (destructive) flag('changes to a directory not known before it runs', '会切换到一个运行时才知道的目录')
         hereUnknown = true
       } else {
-        here = path.resolve(here, known)
+        const next = [...new Set([...heres, ...heres.map((base) => path.resolve(base, known))])]
+        if (next.length > MAX_DIRECTORIES) {
+          if (destructive) flag('changes directory too many times to follow', '切换目录的次数太多，无法逐一确认')
+          hereUnknown = true
+        } else {
+          heres = next
+        }
       }
       continue
     }
-    if (COMPLEX_WRAPPERS.has(head) && DESTRUCTIVE_TOKEN.test(segmentText)) flag(`runs a destructive command through ${head}`)
+    if (head === 'popd') continue
+    if (COMPLEX_WRAPPERS.has(head) && DESTRUCTIVE_TOKEN.test(segmentText)) flag(`runs a destructive command through ${head}`, `会通过 ${head} 运行会删除或改写文件的命令`)
     if (INTERPRETER_RE.test(head) && args.some((a) => new RegExp(`^(?:${INLINE_FLAG}|-r|--eval|--command)$`).test(a))) checkInlineCode(args.join(' '))
     // A program read from a here-document is inline code too.
     else if (INTERPRETER_RE.test(head) && parsed.heredoc) checkInlineCode(parsed.heredoc.body)
     // awk can run any shell command from its program; what it runs is not known here.
-    if (AWKS.has(head) && AWK_RUNS_SHELL.test(args.join(' '))) flag('an awk program that runs shell commands')
+    if (AWKS.has(head) && AWK_RUNS_SHELL.test(args.join(' '))) flag('an awk program that runs shell commands', 'awk 程序会运行其他命令')
     // A variable run as the command, with something destructive around it.
-    if (destructive && /^\$\{?[A-Za-z_]/.test(segment[i] ?? '')) flag('runs a command held in a variable')
+    if (destructive && /^\$\{?[A-Za-z_]/.test(segment[i] ?? '')) flag('runs a command held in a variable', '会运行保存在变量里的命令')
     if (DELETE_COMMANDS.has(head)) {
+      operation = 'remove'
       let afterDashes = false
       for (const arg of args) {
         if (!afterDashes && arg === '--') {
@@ -953,7 +1005,8 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
         check(arg)
       }
     } else if (head === 'find' && args.some((a, k) => a === '-delete' || (/^-(?:exec|execdir|ok|okdir)$/.test(a) && !FIND_READ_ONLY.has(path.basename(args[k + 1] ?? ''))))) {
-      if (args.some((a, k) => /^-(?:exec|execdir|ok|okdir)$/.test(a) && !FIND_READ_ONLY.has(path.basename(args[k + 1] ?? '')))) flag('find runs commands on what it finds')
+      operation = 'remove'
+      if (args.some((a, k) => /^-(?:exec|execdir|ok|okdir)$/.test(a) && !FIND_READ_ONLY.has(path.basename(args[k + 1] ?? '')))) flag('find runs commands on what it finds', 'find 会对找到的文件运行命令')
       const roots: string[] = []
       for (const arg of args) {
         if (arg.startsWith('-') || arg === '!' || arg === '(') break
@@ -964,8 +1017,9 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
       const operands = args.filter((a) => !a.startsWith('-'))
       const destination = operands.at(-1)
       if (destination) {
-        if (staticPath(destination) && HARMLESS_SINKS.has(path.resolve(cwd, staticPath(destination)!))) outside.add(destination)
+        if (staticPath(destination) && HARMLESS_SINKS.has(path.resolve(cwd, staticPath(destination)!))) addOutside(destination)
         else check(destination)
+        operation = 'remove'
         for (const source of operands.slice(0, -1)) check(source)
       }
     } else if (head === 'truncate' || head === 'shred') {
@@ -1028,17 +1082,483 @@ export function analyzeDeletes(fullCommand: string, cwd: string): DeleteAnalysis
       const destination = target ?? operands.at(-1)
       if (destination !== undefined && (target !== undefined || operands.length >= 2)) checkCopy(destination, target !== undefined ? operands : operands.slice(0, -1))
     } else if (head === 'git' && args.includes('clean')) {
-      flag('git clean removes files it does not list first')
+      removes = true
+      flag('git clean removes files it does not list first', 'git clean 会删除文件，而且不会先列出来')
     } else if (head === 'rsync' && args.some((a) => /^--(?:delete|remove-source-files)/.test(a))) {
-      flag('rsync deletes files')
+      removes = true
+      flag('rsync deletes files', 'rsync 会删除文件')
+    } else if (head === 'curl' || head === 'wget') {
+      // Where a download is saved: `curl -o FILE`, `-O` (its remote name), `wget -O FILE`, `-P DIR`, or by default (wget).
+      const saves = downloadTargets(head, plain)
+      if (saves.unknown) flag(saves.unknown.en, saves.unknown.zh)
+      for (const file of saves.files) checkWrite(file, true)
+      for (const directory of saves.directories) checkSaveInto(directory)
     }
   }
-  // A redirect may come before or after a cd: it must be inside from both directories.
-  for (const target of redirectTargets(command)) {
-    check(target, true, cwd)
-    if (here !== cwd) check(target, true, here)
+  // A redirect may come before or after a cd: it must be fine from every directory it may run in.
+  operation = 'write'
+  for (const target of redirectTargets(command)) check(target, true)
+  return {
+    outside: [...outside],
+    ...(unverifiable ? { unverifiable, ...(unverifiableZh ? { unverifiableZh } : {}) } : {}),
+    ...(removes ? { removes } : {}),
+    ...(writes ? { writes } : {}),
   }
-  return { outside: [...outside], ...(unverifiable ? { unverifiable } : {}) }
+}
+
+/** curl's short options that take a value (the rest of the cluster, or the next word). */
+const CURL_VALUE_SHORT = new Set('AbcCdDeEFHKmoPQrtTuUwxXyYz'.split(''))
+/** curl's long options that take a value. */
+const CURL_VALUE_LONG = /^--(?:data[\w-]*|json|form[\w-]*|header|proxy[\w-]*|user[\w-]*|request|referer|cookie|cookie-jar|output|output-dir|dump-header|trace|trace-ascii|stderr|libcurl|config|max-time|connect-timeout|range|retry[\w-]*|write-out|upload-file|cert[\w-]*|key[\w-]*|cacert|capath|resolve|connect-to|interface|limit-rate|max-filesize|time-cond|url|unix-socket|abstract-unix-socket|netrc-file|etag-save|etag-compare|hsts|alt-svc|variable|expand-[\w-]+|ciphers|tls[\w-]*|aws-sigv4|oauth2-bearer|happy-eyeballs-timeout-ms|keepalive-time|local-port|ftp-[\w-]+|mail-[\w-]+|socks[\w-]*|noproxy|preproxy|pinnedpubkey|dns-[\w-]+|login-options|sasl-authzid|service-name|speed-[\w-]+|telnet-option|quote|krb|delegation|engine|egd-file|random-file|create-file-mode|parallel-max|rate)$/
+/** curl's options that write a file (beside the download itself). */
+const CURL_FILE_OPTIONS = /^--(?:dump-header|cookie-jar|trace|trace-ascii|stderr|libcurl|etag-save|hsts|alt-svc)$/
+/** wget's short options that take a value. */
+const WGET_VALUE_SHORT = new Set('OoaPieTtwQUBlARDXI'.split(''))
+const WGET_VALUE_LONG = /^--(?:output-document|output-file|append-output|directory-prefix|input-file|execute|tries|timeout|wait|quota|user-agent|base|level|accept|reject|domains|exclude-domains|include-directories|exclude-directories|header|user|password|post-data|post-file|body-data|body-file|method|load-cookies|save-cookies|ca-certificate|certificate|private-key|limit-rate|referer|bind-address|dns-timeout|connect-timeout|read-timeout|waitretry|default-page|restrict-file-names|cut-dirs|http-user|http-password|ftp-user|ftp-password|proxy-user|proxy-password|warc-file|rejected-log|config|local-encoding|remote-encoding)$/
+
+/**
+ * Where a curl or wget command saves files: `files` it writes by name,
+ * `directories` it saves into under the remote name (undefined: the current
+ * directory), and why it cannot be known (`-K` / `-e` / `--config` that may
+ * say so themselves).
+ */
+function downloadTargets(head: 'curl' | 'wget', args: string[]): { files: string[]; directories: (string | undefined)[]; unknown?: { en: string; zh: string } } {
+  const files: string[] = []
+  let outputDir: string | undefined
+  let remoteName = false
+  let documentNamed = false
+  let spider = false
+  let unknown: { en: string; zh: string } | undefined
+  const valueShort = head === 'curl' ? CURL_VALUE_SHORT : WGET_VALUE_SHORT
+  const valueLong = head === 'curl' ? CURL_VALUE_LONG : WGET_VALUE_LONG
+  const take = (option: string, value: string | undefined) => {
+    if (value === undefined) return
+    if (head === 'curl') {
+      if (option === 'o' || option === '--output') {
+        if (value !== '-') files.push(value)
+      } else if (option === '--output-dir') outputDir = value
+      else if (option === 'D' || option === 'c' || CURL_FILE_OPTIONS.test(option)) {
+        if (value !== '-' && value !== '%') files.push(value)
+      } else if (option === 'K' || option === '--config') unknown ??= { en: 'reads its options from a file', zh: '会从一个文件里读取选项（包括保存位置）' }
+    } else {
+      if (option === 'O' || option === '--output-document') {
+        documentNamed = true
+        if (value !== '-') files.push(value)
+      } else if (option === 'o' || option === 'a' || option === '--output-file' || option === '--append-output' || option === '--save-cookies' || option === '--warc-file' || option === '--rejected-log') files.push(value)
+      else if (option === 'P' || option === '--directory-prefix') outputDir = value
+      else if ((option === 'e' || option === '--execute') && /output|dir(?:ectory)?_prefix|logfile|cookies|warc/i.test(value)) unknown ??= { en: 'sets where it saves through -e', zh: '通过 -e 设置了保存位置' }
+      else if (option === '--config') unknown ??= { en: 'reads its options from a file', zh: '会从一个文件里读取选项（包括保存位置）' }
+    }
+  }
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k]!
+    if (a === '--') break
+    if (a.startsWith('--')) {
+      const eq = a.indexOf('=')
+      const name = eq > 0 ? a.slice(0, eq) : a
+      if (head === 'curl' && /^--(?:remote-name|remote-name-all|remote-header-name)$/.test(name)) remoteName = true
+      if (head === 'wget' && name === '--spider') spider = true
+      if (eq > 0) take(name, a.slice(eq + 1))
+      else if (valueLong.test(name)) take(name, args[++k])
+      continue
+    }
+    if (a.startsWith('-') && a.length > 1) {
+      for (let c = 1; c < a.length; c++) {
+        const ch = a[c]!
+        if (head === 'curl' && (ch === 'O' || ch === 'J')) remoteName = true
+        if (valueShort.has(ch)) {
+          take(ch, c + 1 < a.length ? a.slice(c + 1) : args[++k])
+          break
+        }
+      }
+    }
+  }
+  const directories: (string | undefined)[] = []
+  if (head === 'curl' && remoteName) directories.push(outputDir)
+  if (head === 'curl' && outputDir !== undefined) for (let f = 0; f < files.length; f++) if (!path.isAbsolute(files[f]!) && !/^[~$]/.test(files[f]!)) files[f] = path.join(outputDir, files[f]!)
+  if (head === 'wget' && !documentNamed && !spider) directories.push(outputDir)
+  return { files, directories, ...(unknown ? { unknown } : {}) }
+}
+
+// ── Local web servers, and what a command is for (approval wording) ───────
+
+/** A web server a command starts. */
+export interface ListeningServer {
+  /** `static` serves files only; `scripts` runs the files it serves (php -S, http.server --cgi). */
+  kind: 'static' | 'scripts'
+  port: string
+  /** The address it binds, as written; '' for the program's default (every interface). */
+  bind: string
+  /** False only when it binds to the loopback interface alone (127.0.0.1, ::1, localhost). */
+  exposed: boolean
+  /** Its arguments hold something this cannot read for sure (an unknown option, a variable): it counts as exposed. */
+  unsure?: boolean
+  /** The directory it serves, when known. */
+  directory?: string
+}
+
+const LOOPBACK_HOST = /^(?:127(?:\.\d{1,3}){3}|localhost|::1|\[::1\]|ip6-localhost)$/i
+
+export function isLoopbackHost(host: string): boolean {
+  return LOOPBACK_HOST.test(host.trim())
+}
+
+/** A redirect's own word(s) (`>f`, `2>`, `&>`, `2>&1`): left out of a server's or a download's arguments. */
+const REDIRECT_WORD = /^(?:\d*|&)(?:>>?|<)/
+
+/** The command with `2>&1` / `>&2` / `&>` spelled so the tokenizer does not read their `&` as a separator. */
+function withPlainRedirects(command: string): string {
+  return command.replace(/(\d*)>&(\d+|-)/g, ' ').replace(/&>>?/g, ' >')
+}
+
+/** Arguments without redirections (and their targets). */
+function argsWithoutRedirects(words: string[]): string[] {
+  const out: string[] = []
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]!
+    if (REDIRECT_WORD.test(word)) {
+      if (/^(?:\d*|&)(?:>>?|<)$/.test(word)) i++
+      continue
+    }
+    out.push(word)
+  }
+  return out
+}
+
+/** A runner's package (`npx -y http-server@14 …` → http-server and the arguments after it). */
+function runnerPackage(name: string, args: string[]): { name: string; args: string[] } | undefined {
+  let rest = args
+  if (name === 'pnpm' || name === 'yarn' || name === 'npm') {
+    if (rest[0] !== 'dlx' && rest[0] !== 'exec') return undefined
+    rest = rest.slice(1)
+  } else if (name !== 'npx' && name !== 'bunx' && name !== 'pnpx') {
+    return undefined
+  }
+  let k = 0
+  while (k < rest.length && rest[k]!.startsWith('-')) {
+    if (/^(?:-p|--package)$/.test(rest[k]!)) k++
+    if (rest[k] === '--') {
+      k++
+      break
+    }
+    k++
+  }
+  const pkg = rest[k]
+  if (!pkg) return undefined
+  return { name: pkg.replace(/^(@?[^@]+)@.*$/, '$1'), args: rest.slice(k + 1) }
+}
+
+/** `host:port` / `[::1]:port` / `port` → its parts. */
+function hostPort(value: string): { host: string; port: string } {
+  const bracket = /^\[([^\]]*)\]:(\d+)$/.exec(value)
+  if (bracket) return { host: bracket[1]!, port: bracket[2]! }
+  const at = value.lastIndexOf(':')
+  if (at > 0 && /^\d+$/.test(value.slice(at + 1)) && !value.slice(0, at).includes(':')) return { host: value.slice(0, at), port: value.slice(at + 1) }
+  if (/^\d+$/.test(value)) return { host: '', port: value }
+  return { host: value, port: '' }
+}
+
+/**
+ * The server one simple command starts, if it is a known one: python's
+ * http.server (and SimpleHTTPServer), `php -S`, http-server, serve, and
+ * busybox httpd. Anything in its arguments this cannot read for sure counts
+ * as reachable from other machines.
+ */
+function serverOf(name: string, rawArgs: string[], here: string | undefined): ListeningServer | undefined {
+  const args = argsWithoutRedirects(rawArgs)
+  const dirOf = (value: string | undefined): string | undefined => {
+    if (value === undefined) return here
+    const known = staticPath(value)
+    return known === undefined || here === undefined ? (known && path.isAbsolute(known) ? known : undefined) : path.resolve(here, known)
+  }
+  const unsure = (value: string) => !value || /[`$*?[\]{}]/.test(value)
+  if (INTERPRETER_NAME.test(name) && /^python/i.test(name)) {
+    let m = args.findIndex((a) => a === '-m' || /^-m(?:http\.server|SimpleHTTPServer)$/.test(a))
+    // `-m` must be the interpreter's own option (before any script name).
+    if (m < 0 || args.slice(0, m).some((a) => !a.startsWith('-'))) return undefined
+    const module = args[m] === '-m' ? args[m + 1] : args[m]!.slice(2)
+    if (module !== 'http.server' && module !== 'SimpleHTTPServer') return undefined
+    m += args[m] === '-m' ? 2 : 1
+    let bind = ''
+    let port = '8000'
+    let directory: string | undefined
+    let kind: ListeningServer['kind'] = 'static'
+    let sure = true
+    let positional = 0
+    for (let k = m; k < args.length; k++) {
+      const a = args[k]!
+      const [option, attached] = a.startsWith('--') && a.includes('=') ? [a.slice(0, a.indexOf('=')), a.slice(a.indexOf('=') + 1)] : [a, undefined]
+      if (module === 'http.server' && (/^--b(?:i(?:n(?:d)?)?)?$/.test(option) || option === '-b' || /^-b./.test(a))) {
+        bind = /^-b./.test(a) ? a.slice(2) : attached ?? args[++k] ?? ''
+        if (unsure(bind)) sure = false
+      } else if (module === 'http.server' && (/^--d(?:i(?:r(?:e(?:c(?:t(?:o(?:r(?:y)?)?)?)?)?)?)?)?$/.test(option) || option === '-d' || /^-d./.test(a))) {
+        directory = dirOf(/^-d./.test(a) ? a.slice(2) : attached ?? args[++k])
+      } else if (module === 'http.server' && /^--c(?:g(?:i)?)?$/.test(option)) {
+        kind = 'scripts'
+      } else if (module === 'http.server' && (/^--p(?:r(?:o(?:t(?:o(?:c(?:o(?:l)?)?)?)?)?)?)?$/.test(option) || option === '-p')) {
+        if (attached === undefined) k++
+      } else if (a.startsWith('-')) {
+        sure = false
+      } else if (positional === 0 && /^\d+$/.test(a)) {
+        port = a
+        positional++
+      } else {
+        sure = false
+      }
+    }
+    if (module === 'SimpleHTTPServer') bind = ''
+    return { kind, port, bind, exposed: !sure || !isLoopbackHost(bind), ...(sure ? {} : { unsure: true }), ...(directory ?? here ? { directory: directory ?? here } : {}) }
+  }
+  if (name === 'php') {
+    const s = args.findIndex((a) => a === '-S' || /^-S./.test(a))
+    if (s < 0) return undefined
+    const { host, port } = hostPort(args[s] === '-S' ? args[s + 1] ?? '' : args[s]!.slice(2))
+    const t = args.findIndex((a) => a === '-t' || /^-t./.test(a))
+    const directory = t < 0 ? here : dirOf(args[t] === '-t' ? args[t + 1] : args[t]!.slice(2))
+    return { kind: 'scripts', port, bind: host, exposed: unsure(host) || !isLoopbackHost(host), ...(unsure(host) ? { unsure: true } : {}), ...(directory ? { directory } : {}) }
+  }
+  const runner = runnerPackage(name, args)
+  const program = runner?.name ?? name
+  const rest = runner?.args ?? args
+  if (program === 'http-server') {
+    let bind = '0.0.0.0'
+    let port = '8080'
+    let dir: string | undefined
+    let sure = true
+    const valued = /^-[cePtCK]$|^--(?:cache|ext|proxy|proxy-options|username|password|cert|key|timeout|mimetypes|websocket-proxy)$/
+    const flags = /^-[sdigbUrSvhq]+$|^--(?:silent|gzip|brotli|utc|log-ip|robots|cors|ssl|tls|no-dotfiles|proxy-all|version|help)$/
+    for (let k = 0; k < rest.length; k++) {
+      const a = rest[k]!
+      if (a === '-a' || a === '--address') bind = rest[++k] ?? ''
+      else if (/^-a./.test(a)) bind = a.slice(2)
+      else if (a.startsWith('--address=')) bind = a.slice('--address='.length)
+      else if (a === '-p' || a === '--port') port = rest[++k] ?? port
+      else if (/^-p\d/.test(a)) port = a.slice(2)
+      else if (a.startsWith('--port=')) port = a.slice('--port='.length)
+      else if (valued.test(a)) k++
+      // A value attached to an option that does not change where it listens (`-c-1`, `--cache=10`).
+      else if (/^-[cePtCK]./.test(a) || (/^--[\w-]+=/.test(a) && valued.test(a.slice(0, a.indexOf('='))))) continue
+      else if (flags.test(a)) continue
+      else if (a.startsWith('-')) sure = false
+      else if (dir === undefined) dir = a
+    }
+    if (unsure(bind)) sure = false
+    const directory = dirOf(dir)
+    return { kind: 'static', port, bind, exposed: !sure || !isLoopbackHost(bind), ...(sure ? {} : { unsure: true }), ...(directory ? { directory } : {}) }
+  }
+  if (program === 'serve' && (runner || name === 'serve')) {
+    const listens: string[] = []
+    let dir: string | undefined
+    let sure = true
+    for (let k = 0; k < rest.length; k++) {
+      const a = rest[k]!
+      if (a === '-l' || a === '--listen' || a === '-p') listens.push(rest[++k] ?? '')
+      else if (/^--listen=/.test(a)) listens.push(a.slice(9))
+      else if (a.startsWith('-')) {
+        if (!/^-(?:[sCSuLnd]|-(?:single|cors|symlinks|no-clipboard|no-compression|no-etag|no-port-switching|no-request-logging|debug))$/.test(a)) sure = false
+      } else if (dir === undefined) dir = a
+    }
+    const endpoints = (listens.length ? listens : ['3000']).map((l) => hostPort(l.replace(/^tcp:\/\//, '')))
+    const loopback = sure && endpoints.every((e) => !unsure(e.host) && isLoopbackHost(e.host))
+    const directory = dirOf(dir)
+    return { kind: 'static', port: endpoints.map((e) => e.port).filter(Boolean).join(', ') || '3000', bind: endpoints.map((e) => e.host).join(', '), exposed: !loopback, ...(sure ? {} : { unsure: true }), ...(directory ? { directory } : {}) }
+  }
+  if (name === 'busybox' && args[0] === 'httpd') {
+    const p = args.indexOf('-p')
+    const { host, port } = hostPort(p >= 0 ? args[p + 1] ?? '' : '80')
+    const h = args.indexOf('-h')
+    const directory = dirOf(h >= 0 ? args[h + 1] : undefined)
+    return { kind: 'static', port: port || '80', bind: host, exposed: unsure(host) || !isLoopbackHost(host), ...(unsure(host) ? { unsure: true } : {}), ...(directory ? { directory } : {}) }
+  }
+  return undefined
+}
+
+/** Where the first `(` outside quotes is (a subshell, a group, a substitution), or -1. */
+function firstUnquotedParen(command: string): number {
+  let quote: string | undefined
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]!
+    if (quote) {
+      if (ch === quote) quote = undefined
+      else if (ch === '\\' && quote === '"') i++
+      continue
+    }
+    if (ch === '\\') i++
+    else if (ch === '"' || ch === "'") quote = ch
+    else if (ch === '(') return i
+  }
+  return -1
+}
+
+/** One simple command and the directory it runs in (undefined once a cd cannot be followed). */
+interface PlacedCommand {
+  parsed: ShellCommand
+  head: { index: number; name: string } | undefined
+  args: string[]
+  here: string | undefined
+}
+
+/** The command's simple commands, in order, each with the directory it runs in (a static cd is followed), and the inline code of `sh -c` read the same way. */
+function placedCommands(command: string, cwd: string, depth = 0): PlacedCommand[] {
+  const out: PlacedCommand[] = []
+  let here: string | undefined = cwd
+  // Only the directory changes before the first group or subshell are certain for what follows.
+  const groupAt = firstUnquotedParen(command)
+  const certainChanges = groupAt < 0 ? Infinity : shellCommands(withPlainRedirects(command.slice(0, groupAt))).filter((c) => /^(?:cd|pushd|popd)$/.test(commandHead(c.words)?.name ?? '')).length
+  let changes = 0
+  for (const parsed of shellCommands(withPlainRedirects(command))) {
+    const head = commandHead(parsed.words)
+    const args = head ? parsed.words.slice(head.index + 1) : []
+    if (head && (head.name === 'cd' || head.name === 'pushd' || head.name === 'popd')) {
+      const target = args.find((a) => !a.startsWith('-') || a === '-')
+      // `cd -`, `popd` and a subshell's cd make the directory of what follows uncertain: the words then do not name it.
+      const known = head.name === 'popd' || target === '-' || changes++ >= certainChanges ? undefined : target === undefined ? homedir() : staticPath(target)
+      here = known === undefined || here === undefined ? undefined : path.resolve(here, known)
+    }
+    if (head && SHELL_NAME.test(head.name) && depth < 2) {
+      const code = inlineProgram(head.name, args)?.code
+      if (code !== undefined) {
+        out.push(...placedCommands(code, here ?? cwd, depth + 1).map((c) => (here === undefined ? { ...c, here: undefined } : c)))
+        continue
+      }
+    }
+    out.push({ parsed, head, args, here })
+  }
+  return out
+}
+
+/** The web servers a command starts (followed through `cd`, wrappers and `sh -c`). */
+export function listeningServers(command: string, cwd: string): ListeningServer[] {
+  const servers: ListeningServer[] = []
+  for (const { head, args, here } of placedCommands(withoutHeredocBodies(command), cwd)) {
+    if (!head) continue
+    const server = serverOf(head.name, args, here)
+    if (server) servers.push(server)
+  }
+  return servers
+}
+
+/** A command's purpose in plain words, both languages. */
+export interface CommandSummary {
+  zh: string
+  en: string
+}
+
+/** Commands that do nothing worth saying on a card (waiting, printing, checking). */
+const QUIET_COMMANDS = new Set(['sleep', 'true', ':', 'wait', 'echo', 'printf', 'pwd', 'date', 'cd', 'pushd', 'popd'])
+
+function placeZh(directory: string | undefined, cwd: string): { zh: string; en: string } {
+  if (directory === undefined) return { zh: '当前目录里的网页', en: 'the pages in the current directory' }
+  if (isInsideWorkspace(cwd, directory)) {
+    const rel = path.relative(realPathOf(cwd), realPathOf(directory))
+    return rel ? { zh: `工作区 ${rel} 里的网页`, en: `the pages in ${rel} in the workspace` } : { zh: '工作区里的网页', en: 'the pages in the workspace' }
+  }
+  return { zh: `${directory} 里的网页`, en: `the pages in ${directory}` }
+}
+
+function urlHost(url: string): string | undefined {
+  try {
+    return new URL(url).hostname.replace(/^\[|\]$/g, '')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * What a command does, in plain words, from what it is classified as: a
+ * local preview, a web server other machines can reach, a check of a page
+ * on this machine, a download, output written to a file. Undefined when any
+ * part is something this cannot put in words (the card then says nothing
+ * it cannot stand behind).
+ */
+export function summarizeShellCommand(command: string, cwd: string): CommandSummary | undefined {
+  if (/<</.test(command)) return undefined
+  const zh: string[] = []
+  const en: string[] = []
+  for (const { parsed, head, args, here } of placedCommands(command, cwd)) {
+    if (parsed.join === 'subst' || parsed.join === 'procsub-in' || parsed.join === 'procsub-out' || parsed.substitutedHead) return undefined
+    if (!head) {
+      if (parsed.words.every((w) => ASSIGNMENT.test(w))) continue
+      return undefined
+    }
+    const plain = argsWithoutRedirects(args)
+    const server = serverOf(head.name, args, here)
+    if (server) {
+      const what = placeZh(server.directory, cwd)
+      if (!server.exposed) {
+        const at = `${server.bind || '127.0.0.1'}:${server.port}`
+        if (server.kind === 'static') {
+          zh.push(`启动本地预览：在本机 ${at} 打开${what.zh}（只有 agent 自己能访问）`)
+          en.push(`start a local preview: serve ${what.en} at ${at} on this machine (only the agent can reach it)`)
+        } else {
+          zh.push(`启动本地网页服务：在本机 ${at} 运行${what.zh}（只有 agent 自己能访问）`)
+          en.push(`start a local web server: run ${what.en} at ${at} on this machine (only the agent can reach it)`)
+        }
+      } else {
+        const everywhere = !server.bind || /^(?:0\.0\.0\.0|::|\[::\])$/.test(server.bind)
+        const where = server.unsure ? '无法确认它只绑定在本机' : everywhere ? '绑定在所有网络接口上' : `绑定在地址 ${server.bind} 上`
+        const whereEn = server.unsure ? 'and it cannot be told that it binds to this machine only' : everywhere ? 'bound to every network interface' : `bound to address ${server.bind}`
+        zh.push(`启动网页服务：在端口 ${server.port} 上${server.kind === 'static' ? '提供' : '运行'}${what.zh}，${where}，其他机器也可能访问到`)
+        en.push(`start a web server: ${server.kind === 'static' ? 'serve' : 'run'} ${what.en} on port ${server.port}, ${whereEn}, so other machines may reach it`)
+      }
+    } else if (head.name === 'curl' || head.name === 'wget') {
+      if (curlSendsData(plain) || plain.some((a) => /^--(?:post|body|method)/.test(a))) return undefined
+      const urls = plain.filter((a) => /^https?:\/\//i.test(a))
+      if (!urls.length) return undefined
+      const saves = downloadTargets(head.name, plain)
+      const files = saves.files.filter((f) => f !== '/dev/null')
+      const local = urls.every((u) => {
+        const host = urlHost(u)
+        return host !== undefined && isLoopbackHost(host)
+      })
+      const shown = urls.join(' ')
+      if (saves.unknown) return undefined
+      if (files.length) {
+        zh.push(`把 ${shown} 下载到 ${files.join('、')}`)
+        en.push(`download ${shown} to ${files.join(', ')}`)
+      } else if (saves.directories.length) {
+        const into = saves.directories[0] ?? (here === undefined ? undefined : isInsideWorkspace(cwd, here) ? path.relative(realPathOf(cwd), realPathOf(here)) || '.' : here)
+        const intoZh = into === undefined ? '当前目录' : into === '.' ? '工作区' : isInsideWorkspace(cwd, path.resolve(cwd, into)) && !path.isAbsolute(into) ? `工作区里的 ${into}` : into
+        const intoEn = into === undefined ? 'the current directory' : into === '.' ? 'the workspace' : into
+        zh.push(`下载 ${shown}，保存到${/^[\x21-\x7e]/.test(intoZh) ? ' ' : ''}${intoZh}`)
+        en.push(`download ${shown} into ${intoEn}`)
+      } else if (local) {
+        zh.push(`检查本机网页 ${shown} 能否打开`)
+        en.push(`check that ${shown} opens on this machine`)
+      } else {
+        zh.push(`读取网页 ${shown}`)
+        en.push(`fetch ${shown}`)
+      }
+    } else if (!QUIET_COMMANDS.has(head.name)) {
+      return undefined
+    }
+    // Output this part writes to a file.
+    for (let k = 0; k < parsed.words.length; k++) {
+      const word = parsed.words[k]!
+      const match = /^(?:\d*)(>>?)(.*)$/.exec(word)
+      if (!match) continue
+      const target = match[2] || parsed.words[++k]
+      if (!target || target === '/dev/null') continue
+      const known = staticPath(target)
+      if (known === undefined) return undefined
+      const absolute = path.resolve(here ?? cwd, known)
+      const append = match[1] === '>>'
+      if (isTemporaryPath(absolute)) {
+        const fresh = !existsSync(absolute)
+        zh.push(`${append ? '把输出追加到' : '把输出写进'}${fresh ? '新的' : ''}临时文件 ${known}`)
+        en.push(`${append ? 'append its output to' : 'write its output to'} ${fresh ? 'a new ' : 'the '}temporary file ${known}`)
+      } else if (here !== undefined && isInsideWorkspace(cwd, absolute)) {
+        const rel = path.relative(realPathOf(cwd), realPathOf(absolute))
+        zh.push(`${append ? '把输出追加到' : '把输出写进'}工作区里的 ${rel}`)
+        en.push(`${append ? 'append its output to' : 'write its output to'} ${rel} in the workspace`)
+      } else {
+        zh.push(`${append ? '把输出追加到' : '把输出写进'} ${known}（工作区以外）`)
+        en.push(`${append ? 'append its output to' : 'write its output to'} ${known} (outside the workspace)`)
+      }
+    }
+  }
+  if (!zh.length) return undefined
+  return { zh: `这条命令会：${zh.join('；')}。`, en: `This command will: ${en.join('; ')}.` }
 }
 
 // ── Commands on a server the agent manages (server_setup run) ──────────────
