@@ -323,7 +323,7 @@ section('N1 git config, hooks and filters')
   const commit = await extras.executeExtraTool('git_commit', { message: 'no hooks' }, evil)
   check('git_commit runs no hook from .git/hooks (and still commits)', staged.ok && commit.ok && !fs.existsSync(marker('hook')) && !fs.existsSync(marker('fsmonitor')), { staged: staged.output, commit: commit.output })
   check('the safety options switch off fsmonitor, hooks, diff.external and the global attributes file',
-    ['core.fsmonitor=false', 'diff.external='].every((option) => extras.gitSafetyOptions().includes(option)) &&
+    ['--no-pager', 'core.fsmonitor=false', 'diff.external='].every((option) => extras.gitSafetyOptions().includes(option)) &&
       extras.gitSafetyOptions().some((option) => option.startsWith('core.hooksPath=')) &&
       extras.gitSafetyOptions().some((option) => option.startsWith('core.attributesFile=')) &&
       extras.gitSafetyOptions(['lfs']).includes('filter.lfs.process='))
@@ -361,6 +361,105 @@ section('N1 git config, hooks and filters')
   check('file extras refuse git control files as well', extraWrites.every((r) => !r.ok && denied.test(r.output)), extraWrites.map((r) => r.output))
   check('an ordinary file next to .git is still writable',
     (await executeWriteFile({ type: 'write_file', path: 'notes/git-config.md', content: 'ok\n' } as never, { cwd: evil, permissionMode: 'ask' } as never)).ok === true)
+}
+
+// ── N1b: signing programs and other program-running keys in the repository's config ──
+section('N1b git signing programs and other program keys')
+{
+  const repo2 = path.join(sandbox, 'sign-repo')
+  fs.mkdirSync(repo2, { recursive: true })
+  // Hermetic: the machine's own global/system git config (its signing setup) stays out.
+  const emptyGlobal = path.join(sandbox, 'empty.gitconfig')
+  fs.writeFileSync(emptyGlobal, '')
+  const savedGitEnv = { global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM }
+  process.env.GIT_CONFIG_GLOBAL = emptyGlobal
+  process.env.GIT_CONFIG_NOSYSTEM = '1'
+  const signEnv = { ...gitEnv, GIT_CONFIG_GLOBAL: emptyGlobal, GIT_CONFIG_NOSYSTEM: '1' }
+  try {
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: repo2, env: signEnv, stdio: 'pipe' })
+  git('init', '-q', '-b', 'main')
+  fs.writeFileSync(path.join(repo2, 'a.txt'), 'a\n')
+  git('add', 'a.txt')
+  git('commit', '-q', '-m', 'init')
+  const marker = (name: string) => path.join(sandbox, `sign-marker-${name}`)
+  const script = (name: string) => {
+    const file = path.join(sandbox, `sign-planted-${name}.sh`)
+    fs.writeFileSync(file, `#!/bin/sh\ntouch "${marker(name)}"\nexit 1\n`, { mode: 0o755 })
+    return file
+  }
+  let counter = 0
+  const stageChange = () => {
+    fs.writeFileSync(path.join(repo2, 'a.txt'), `change ${++counter}\n`)
+    git('add', 'a.txt')
+  }
+  // Precondition: a signed commit really runs a repository-level gpg.program.
+  git('config', 'commit.gpgSign', 'true')
+  git('config', 'gpg.program', script('pre'))
+  stageChange()
+  try { git('commit', '-q', '-m', 'signed') } catch { /* the planted program fails the signature */ }
+  check('precondition: plain git runs a repository-level gpg.program on a signed commit', fs.existsSync(marker('pre')))
+  git('config', '--unset', 'gpg.program')
+
+  const keys = ['gpg.program', 'gpg.openpgp.program', 'gpg.x509.program', 'gpg.ssh.program', 'gpg.ssh.defaultKeyCommand']
+  for (const key of keys) {
+    const name = key.replace(/\W/g, '_')
+    git('config', key, script(name))
+    if (key.startsWith('gpg.x509')) git('config', 'gpg.format', 'x509')
+    if (key.startsWith('gpg.ssh')) git('config', 'gpg.format', 'ssh')
+    stageChange()
+    const result = await extras.executeExtraTool('git_commit', { message: `with ${key}` }, repo2)
+    check(`git_commit refuses while the repository sets ${key} (nothing ran)`,
+      !result.ok && /signing programs/.test(result.output) && /run_command/.test(result.output) && !fs.existsSync(marker(name)), result.output)
+    git('config', '--unset', key)
+    try { git('config', '--unset', 'gpg.format') } catch { /* not set */ }
+  }
+  // Through an include in the local config.
+  const included = path.join(sandbox, 'included.gitconfig')
+  fs.writeFileSync(included, `[gpg]\n\tprogram = ${script('included')}\n`)
+  git('config', 'include.path', included)
+  stageChange()
+  const viaInclude = await extras.executeExtraTool('git_commit', { message: 'via include' }, repo2)
+  check('a signing program reached through include.path is refused too', !viaInclude.ok && /signing programs/.test(viaInclude.output) && !fs.existsSync(marker('included')), viaInclude.output)
+  git('config', '--unset', 'include.path')
+  git('config', '--unset', 'commit.gpgSign')
+
+  // The owner's own global signing setup is left alone.
+  const globalConfig = path.join(sandbox, 'owner.gitconfig')
+  fs.writeFileSync(globalConfig, `[gpg]\n\tprogram = ${script('owner')}\n`)
+  process.env.GIT_CONFIG_GLOBAL = globalConfig
+  try {
+    stageChange()
+    const owner = await extras.executeExtraTool('git_commit', { message: 'owner signing config' }, repo2)
+    check('a gpg.program in the owner\'s global config does not block git_commit', owner.ok, owner.output)
+  } finally {
+    process.env.GIT_CONFIG_GLOBAL = emptyGlobal
+  }
+
+  // Keys the extras never reach (or switch off): planted, nothing runs.
+  for (const [key, name] of [['core.pager', 'pager'], ['core.editor', 'editor'], ['sequence.editor', 'seqeditor'], ['core.sshCommand', 'ssh'], ['core.askPass', 'askpass'], ['credential.helper', 'credential'], ['merge.evil.driver', 'merge'], ['diff.evil.command', 'diffcmd']] as const) {
+    git('config', key, script(name))
+  }
+  fs.writeFileSync(path.join(repo2, '.gitattributes'), '*.txt merge=evil diff=evil\n')
+  fs.writeFileSync(path.join(repo2, 'a.txt'), 'worktree change\n')
+  const runs = [
+    await extras.executeExtraTool('git_log', { limit: 3 }, repo2),
+    await extras.executeExtraTool('git_status', {}, repo2),
+    await extras.executeExtraTool('git_diff', {}, repo2),
+    await extras.executeExtraTool('git_branch', {}, repo2),
+  ]
+  git('add', '.gitattributes', 'a.txt')
+  runs.push(await extras.executeExtraTool('git_commit', { message: 'no editor, no pager' }, repo2))
+  runs.push(await extras.executeExtraTool('git_branch', { create: 'side' }, repo2))
+  runs.push(await extras.executeExtraTool('git_branch', { checkout: 'main' }, repo2))
+  const ran = ['pager', 'editor', 'seqeditor', 'ssh', 'askpass', 'credential', 'merge', 'diffcmd'].filter((name) => fs.existsSync(marker(name)))
+  check('core.pager, core.editor, sequence.editor, core.sshCommand, core.askPass, credential.helper, merge and diff command drivers: planted, nothing runs',
+    ran.length === 0 && runs.every((r) => r.ok), { ran, outputs: runs.filter((r) => !r.ok).map((r) => r.output) })
+  } finally {
+    for (const [key, value] of [['GIT_CONFIG_GLOBAL', savedGitEnv.global], ['GIT_CONFIG_NOSYSTEM', savedGitEnv.nosystem]] as const) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
 }
 
 // ── N4: Windows program resolution ──────────────────────────────────────────
