@@ -699,6 +699,25 @@ export async function redactShown(text: string): Promise<string> {
  * Before this process exits: in live mode, disconnect from the shared
  * browser (it stays open for the owner and the next run). Otherwise nothing.
  */
+/** Local pages a turn leaves open go back to about:blank: no later run or turn gets one (fileGuard.ts). */
+async function blankLocalPages(pages: Page[]): Promise<void> {
+  for (const page of pages) {
+    if (page.isClosed() || !/^file:/i.test(page.url())) continue;
+    await page.goto('about:blank', { timeout: 5_000 }).catch(() => page.close().catch(() => undefined));
+  }
+}
+
+/**
+ * The end of an agent turn (runAgent): the turn's workspace no longer opens
+ * in the browser, and the local pages it left (its own, in live mode; every
+ * page otherwise) go back to about:blank.
+ */
+export async function endBrowserTurn(): Promise<void> {
+  releaseBrowserWorkspace();
+  if (!isContextAlive(_context)) return;
+  await blankLocalPages(_liveBrowser ? [...ownPages(), ...(_activePage ? [_activePage] : [])] : _context.pages());
+}
+
 export async function releaseBrowser(): Promise<void> {
   // The run lets the browser go: its workspace's files no longer open (fileGuard.ts).
   releaseBrowserWorkspace();
@@ -710,6 +729,8 @@ export async function releaseBrowser(): Promise<void> {
   for (const page of ownPages()) {
     if (page !== keep) await page.close().catch(() => undefined);
   }
+  // The tab left for the owner and the next run is never a local page of this run's workspace.
+  if (keep) await blankLocalPages([keep]);
   if (keep && dir) {
     const targetId = await targetIdOf(keep);
     if (targetId) releaseTab(dir, targetId);

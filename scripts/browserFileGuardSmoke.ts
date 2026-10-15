@@ -150,10 +150,36 @@ async function main(): Promise<void> {
   await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: `location.href = ${JSON.stringify(pathToFileURL(path.join(site, 'index.html')).href)}` }, other);
   await neverSecret('a later run in another workspace cannot load the earlier run\'s pages', /PAGE-OK/);
   await session.releaseBrowser();
+
+  // The tab a run leaves for the next one is never one of its local pages.
+  await tools.executeBrowserNavigate({ type: 'browser_navigate', path: 'sites/p/index.html' }, context);
+  await session.releaseBrowser();
+  const kept = await session.getActivePage();
+  assert.equal(kept.url(), 'about:blank', `the next run got ${kept.url()}`);
+  ok('the tab kept for the next run is taken back to about:blank when it was a local page');
+  // A new run that only clicks or runs scripts (no browser_navigate, so no workspace): nothing local opens.
+  await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: `location.href = ${JSON.stringify(pathToFileURL(path.join(site, 'index.html')).href)}` }, context);
+  await neverSecret('a run with no browser_navigate (only a script) opens nothing local', /PAGE-OK/);
+  // The end of a turn (long-lived processes: chat bridges): the workspace closes and local pages go blank.
+  await tools.executeBrowserNavigate({ type: 'browser_navigate', path: 'sites/p/index.html' }, context);
+  await session.endBrowserTurn();
+  assert.equal((await session.getActivePage()).url(), 'about:blank');
+  await tools.executeBrowserEvaluate({ type: 'browser_evaluate', script: `location.href = ${JSON.stringify(pathToFileURL(path.join(site, 'index.html')).href)}` }, context);
+  await neverSecret('after the end of a turn the local page is gone and nothing local opens until a browser tool names a workspace', /PAGE-OK/);
   await tools.executeBrowserNavigate({ type: 'browser_navigate', path: 'sites/p/index.html' }, context);
 
-  // An http page never loads local files, not even the workspace's.
-  const server = http.createServer((_req, res) => {
+  // An http page never loads local files, not even the workspace's (also not from its service worker: no frame).
+  const SW = `self.addEventListener('message', async (e) => { let text; try { text = await (await fetch(e.data)).text(); } catch (err) { text = 'refused ' + err; } e.source.postMessage(text); });`;
+  const server = http.createServer((req, res) => {
+    if (req.url === '/sw.js') return void res.writeHead(200, { 'content-type': 'text/javascript' }).end(SW);
+    if (req.url === '/sw.html') {
+      return void res.writeHead(200, { 'content-type': 'text/html' }).end(`<!doctype html><title>sw</title><pre id="out">waiting</pre><script>
+        navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).then((r) => {
+          navigator.serviceWorker.onmessage = (e) => { document.getElementById('out').textContent = e.data; };
+          r.active.postMessage(${JSON.stringify(pathToFileURL(path.join(site, 'index.html')).href)});
+        }).catch((err) => { document.getElementById('out').textContent = 'no worker ' + err; });
+      </script>`);
+    }
     res.writeHead(200, { 'content-type': 'text/html' }).end(`<!doctype html><title>web</title><h1>WEB</h1><img id="i" src="${pathToFileURL(path.join(site, 'a.png')).href}"><iframe id="f" src="${secretUrl}"></iframe>`);
   });
   await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
@@ -165,6 +191,12 @@ async function main(): Promise<void> {
   const img = await (await session.getActivePage()).evaluate(() => (document.getElementById('i') as HTMLImageElement).naturalWidth);
   assert.equal(img, 0, 'an http page loaded a local image');
   ok('an http page cannot load a local image, even from the workspace');
+  await tools.executeBrowserNavigate({ type: 'browser_navigate', url: `${web}sw.html`, waitFor: 'domcontentloaded', extractText: false }, context);
+  const swPage = await session.getActivePage();
+  await swPage.waitForFunction(() => document.getElementById('out')?.textContent !== 'waiting', null, { timeout: 10_000 }).catch(() => undefined);
+  const swText = (await swPage.textContent('#out')) ?? '';
+  assert.doesNotMatch(swText, /PAGE-OK/, `a service worker read a local file: ${swText}`);
+  ok(`a service worker (a request with no frame) reads no local file (${swText.slice(0, 60)})`);
   server.closeAllConnections();
   server.close();
 

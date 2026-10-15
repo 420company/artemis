@@ -20,11 +20,14 @@ import { isAlwaysPrivatePath } from '../../utils/fs.js';
 
 /**
  * The workspace whose files the browser may open: the one the current run's
- * browser tools work in (set by browser_navigate and browser_tabs, from the
- * tool's own cwd), and nothing once the run lets the browser go
- * (releaseBrowser, closeBrowser). It is replaced, never added to, so a page
- * left from another run (one engine process serving several runs, the shared
- * live browser) never reaches that run's workspace through this guard. No
+ * browser tools work in (set by browser_navigate and browser_tabs from the
+ * tool's own cwd, once the call has passed the live browser's gate), and
+ * nothing once the run's turn ends (runAgent, endBrowserTurn) or the run lets
+ * the browser go (releaseBrowser, closeBrowser). It is replaced, never added
+ * to, so a page left from another run never reaches that run's workspace
+ * through this guard; the local pages a turn leaves open are taken back to
+ * about:blank as it ends. There is one per engine process: browser tools of
+ * one process that run at the same time share it (the last call's wins). No
  * workspace set: no local file opens.
  */
 let current: string | undefined;
@@ -42,31 +45,46 @@ export function releaseBrowserWorkspace(): void {
   for (const state of states) state.root = undefined;
 }
 
-function isWithin(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+/** Whether a workspace is set (a browser tool ran in this turn). */
+export function browserWorkspaceSet(): boolean {
+  return current !== undefined;
 }
 
-/** Whether a `file:` request may be answered (false for anything it cannot decide, and with no workspace set). */
-export async function localFileAllowed(url: string, request: { navigation: boolean; frameUrl?: string | undefined }, root: string | undefined = current): Promise<boolean> {
+function isWithin(root: string, target: string): boolean {
+  const relative = path.relative(root, target);
+  // `..` as a whole first segment (a name such as `..x` is inside).
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+}
+
+/**
+ * Whether a `file:` request may be answered, and the real path that was
+ * checked (the file is then served from it, not from the path asked for).
+ * Refused for anything it cannot decide, and with no workspace set.
+ */
+export async function checkLocalFile(url: string, request: { navigation: boolean; frameUrl?: string | undefined }, root: string | undefined = current): Promise<{ ok: boolean; real?: string; file?: boolean }> {
   try {
     const parsed = new URL(url);
-    if (parsed.protocol !== 'file:') return true;
-    if (!root) return false;
-    // A local file for a page that is not itself local (an http(s) page, a blank frame): never.
-    if (!request.navigation && !/^file:/i.test(request.frameUrl ?? '')) return false;
+    if (parsed.protocol !== 'file:') return { ok: true };
+    if (!root) return { ok: false };
+    // A local file for a page that is not itself local (an http(s) page, a blank frame, a worker): never.
+    if (!request.navigation && !/^file:/i.test(request.frameUrl ?? '')) return { ok: false };
     const real = await fsp.realpath(fileURLToPath(parsed));
-    if (isAlwaysPrivatePath(real)) return false;
-    return isWithin(await fsp.realpath(root), real);
+    if (isAlwaysPrivatePath(real)) return { ok: false };
+    if (!isWithin(await fsp.realpath(root), real)) return { ok: false };
+    return { ok: true, real, file: (await fsp.stat(real)).isFile() };
   } catch {
-    return false;
+    return { ok: false };
   }
+}
+
+export async function localFileAllowed(url: string, request: { navigation: boolean; frameUrl?: string | undefined }, root: string | undefined = current): Promise<boolean> {
+  return (await checkLocalFile(url, request, root)).ok;
 }
 
 const guarded = new WeakSet<BrowserContext>();
 
 async function decide(route: Route, root: string | undefined): Promise<void> {
-  let allowed = false;
+  let verdict: { ok: boolean; real?: string; file?: boolean } = { ok: false };
   try {
     const request = route.request();
     let frameUrl: string | undefined;
@@ -75,11 +93,17 @@ async function decide(route: Route, root: string | undefined): Promise<void> {
     } catch {
       // A service worker's request: no frame, so no local page asked for it.
     }
-    allowed = await localFileAllowed(request.url(), { navigation: request.isNavigationRequest(), frameUrl }, root);
+    verdict = await checkLocalFile(request.url(), { navigation: request.isNavigationRequest(), frameUrl }, root);
   } catch {
-    allowed = false;
+    verdict = { ok: false };
   }
-  await (allowed ? route.continue() : route.abort('accessdenied')).catch(() => undefined);
+  if (!verdict.ok) {
+    await route.abort('accessdenied').catch(() => undefined);
+    return;
+  }
+  // A file is served from the real path that was checked, so a link swapped in after the check is
+  // not followed; a folder (its listing) goes on as asked.
+  await (verdict.real && verdict.file ? route.fulfill({ path: verdict.real }) : route.continue()).catch(() => route.abort('accessdenied').catch(() => undefined));
 }
 
 /**
@@ -91,9 +115,10 @@ async function decide(route: Route, root: string | undefined): Promise<void> {
  */
 export async function guardLocalFiles(ctx: BrowserContext): Promise<void> {
   if (guarded.has(ctx)) return;
-  guarded.add(ctx);
   const state = { root: current };
+  // Marked only once the route is in place (a failure leaves the context to be guarded on the next try).
+  await ctx.route((url) => url.protocol === 'file:', (route) => decide(route, state.root));
+  guarded.add(ctx);
   states.add(state);
   ctx.on('close', () => states.delete(state));
-  await ctx.route((url) => url.protocol === 'file:', (route) => decide(route, state.root));
 }

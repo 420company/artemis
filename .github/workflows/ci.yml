@@ -88,3 +88,7 @@ jobs:
         run: npm run test:workflowRouter
       - name: Speech
         run: npm run test:speech
+      - name: Hard approvals (classifier, card wording, signed answers)
+        run: npm run test:approvals
+      - name: Live browser (multiplexer, takeover, workspace pages and local files)
+        run: npm run test:browserLive

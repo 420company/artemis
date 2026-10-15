@@ -169,7 +169,7 @@ export async function workspacePageUrl(inputPath: string, cwd: string): Promise<
   const real = await fsp.realpath(file);
   const root = await fsp.realpath(cwd);
   const relative = path.relative(root, real);
-  if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error(`Path escapes working directory: ${inputPath}`);
+  if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error(`Path escapes working directory: ${inputPath}`);
   if (isAlwaysPrivatePath(real)) throw new Error(`${inputPath} is in a protected directory`);
   if (!(await fsp.stat(real)).isFile()) throw new Error(`${inputPath} is not a page`);
   return pathToFileURL(real).href;
@@ -1033,7 +1033,11 @@ onIdentityLiveWindow(() => {
 });
 
 export const executeBrowserNavigate = (action: BrowserNavigateAction, context?: ToolExecutionContext) =>
-  (setBrowserWorkspace(context?.cwd ?? process.cwd()), gated(() => runBrowserNavigate(action, context?.cwd), context?.abortSignal));
+  gated(() => {
+    // Set once the call passed the gate (the owner may hold the browser meanwhile).
+    setBrowserWorkspace(context?.cwd ?? process.cwd());
+    return runBrowserNavigate(action, context?.cwd);
+  }, context?.abortSignal);
 export const executeBrowserScreenshot = (action: BrowserScreenshotAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserScreenshot(action, context), context?.abortSignal);
 export const executeBrowserExtract = (action: BrowserExtractAction, context?: ToolExecutionContext) =>
@@ -1047,7 +1051,10 @@ export const executeBrowserFormInput = (action: BrowserFormInputAction, context?
 export const executeBrowserEvaluate = (action: BrowserEvaluateAction, context?: ToolExecutionContext) =>
   gated(() => runBrowserEvaluate(action), context?.abortSignal);
 export const executeBrowserTabs = (action: BrowserTabsAction, context?: ToolExecutionContext) =>
-  (setBrowserWorkspace(context?.cwd ?? process.cwd()), gated(() => runBrowserTabs(action, context?.cwd), context?.abortSignal));
+  gated(() => {
+    setBrowserWorkspace(context?.cwd ?? process.cwd());
+    return runBrowserTabs(action, context?.cwd);
+  }, context?.abortSignal);
 export const executeBrowserType = (action: BrowserTypeAction, context?: ToolExecutionContext) =>
   gated((beforeSecret) => runBrowserType(action, beforeSecret), context?.abortSignal, { typesSecret: hasIdentityPlaceholder(action.text) });
 export const executeBrowserWait = (action: BrowserWaitAction, context?: ToolExecutionContext) =>

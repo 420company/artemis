@@ -61,37 +61,54 @@ not classified, a body that is a program is checked as inline code.
 
 **Web servers** (`listeningServers`): a known static or script server
 (`python -m http.server` / `SimpleHTTPServer`, `php -S`, `http-server`,
-`serve`, `busybox httpd`, also through `nohup`, `setsid`, `npx` or `sh -c`)
-bound only to the loopback interface (`--bind 127.0.0.1`, `-b ::1`,
-`localhost`) needs nothing when every directory it may serve is in the
-workspace (a static server also in the temp dir). Loopback is not private
-on a shared host (other programs and users on the machine reach it), so a
-loopback server of anything else (`--directory /home`, `-t /home`, a `cd
-/etc` before it, a directory not known before it runs) asks as
-`shell_high_risk`, medium risk, and one that runs what it serves (`php -S`,
-`http.server --cgi`) runs freely only on the workspace; `php -S` with any
-option but `-S`/`-t` (`-d auto_prepend_file=…`, `-c php.ini`, `-n`, …)
-asks, and its router script must be in the workspace too. A wrapper's
-directory change (`env -C DIR`, `env --chdir=DIR`, `sudo -D DIR`, `sudo
---chdir DIR`) is followed for the command it runs, for servers and for
-deletes and writes alike (an unknown one makes the directory unknown, and
-so does `sudo -i` / `--login`, a login shell in the target user's home).
-A program that runs a command of its own (`systemd-run`, `unshare`,
-`nsenter`, `firejail`, `bwrap`, `tmux`, `screen`, `at`, `su`, `flock`,
-`chroot`, `watch`, …) is not followed: a word in its arguments (or in a
-string, a here-string or a here-document it is given) that deletes,
-writes or serves (`rm`, `tee`, `dd`, `mv`, `cp`, `chmod`, `chown`,
-`truncate`, `shred`, `>`, a web server) asks, and so does such a word at
-the start of an argument of a program this does not know (`./deploy.sh rm
-…`, `some-runner "cd x; rm y"`). Web servers inside `su -c`, `flock`,
-`chroot` and `systemd-run` are found too (in a directory not known after
-a login, a new root or a service without `--same-dir`).
-Bound anywhere
-else, or by default (python's http.server binds every interface unless told
-otherwise), or with an option or a variable the classifier cannot read, it
-asks as `shell_high_risk` with **medium** risk ("a web server other
-machines may reach"). A server the classifier does not know is not
-classified (it is code like any other).
+`serve`, `busybox httpd`, also through `nohup`, `setsid`, `npx`, `sh -c`,
+`su -c`, `flock`, `chroot` and `systemd-run`) is classified by where it
+listens and what it serves.
+- Bound anywhere but the loopback interface, by default (python's
+  http.server binds every interface unless told otherwise), or with an
+  option or a variable the classifier cannot read, it asks as
+  `shell_high_risk` with **medium** risk ("a web server other machines may
+  reach").
+- Bound only to loopback (`--bind 127.0.0.1`, `-b ::1`, `localhost`), it
+  needs nothing when every directory it may serve is in the workspace (a
+  static server also in the temp dir). Loopback is not private on a shared
+  host (other programs and users on the machine reach it), so a loopback
+  server of anything else (`--directory /home`, `-t /home`, a `cd /etc`
+  before it, a directory not known before it runs, a login, a new root, a
+  service without `--same-dir`) asks as `shell_high_risk`, medium risk.
+- One that runs what it serves (`php -S`, `http.server --cgi`) runs freely
+  only on the workspace; `php -S` with any option but `-S`/`-t` (`-d
+  auto_prepend_file=…`, `-c php.ini`, `-n`, …) asks, and its router script
+  must be in the workspace too.
+- A server the classifier does not know is not classified (it is code like
+  any other).
+A server behind a runner gets the server's card, not a delete card.
+
+**Wrappers and runners.** A wrapper's directory change (`env -C DIR`,
+`env --chdir=DIR`, `sudo -D DIR`, `sudo --chdir DIR`, long options also
+shortened as getopt allows: `sudo --chd`) is followed for the command it
+runs, for servers and for deletes and writes alike. An unknown one makes
+the directory unknown, and so do `sudo -i` / `--login` (a login shell in
+the target user's home) and `sudo -R` / `--chroot`; any relative target
+after that (`find . -delete`, `tee x`) asks. `su -c`, `flock` and
+`systemd-run` are read into: the command they run is classified like any
+other, in the directory it runs in. Other programs that run a command of
+their own (`unshare`, `nsenter`, `firejail`, `bwrap`, `tmux`, `screen`,
+`at`, `chroot`, `watch`, …) are not followed: a word that deletes, writes
+or serves anywhere in their arguments (or in a string, a here-string or a
+here-document they are given; also given as a path such as `/bin/rm`)
+asks: `rm`, `tee`, `dd`, `mv`, `cp`, `chmod`, `chown`, `truncate`,
+`shred`, `trash`, `sed`, `curl`, `wget`, `rsync`, `git`, `find`, a
+redirect, anything the delete check treats as destructive (`-delete`,
+`--delete`, `of=`, inline code that writes), a web server. `xargs` counts
+by the command it runs (`xargs grep install` needs nothing, `xargs rm`
+asks). Commands piped into `at`, `batch` or `expect` (or read by `at` from
+a file) run like a pipe into a shell: high risk. A program the classifier
+does not know (or a script run by an interpreter or a shell: `bash
+deploy.sh …`, `node run.js …`) asks when such a word is its first
+operand, or starts an argument holding a whole command (a string with
+spaces, or a part after `;`, `&`, `|`): `./deploy.sh rm …`, `some-runner
+"cd x; rm y"`.
 
 **Directories.** A `cd` to a static path is followed. A subshell (`(cd x
 && …)`), `cd -`, `popd` or a cd that fails puts the shell back where it
@@ -119,12 +136,19 @@ same context) opens only when its real path is inside the workspace the
 current run's browser tools work in and outside the protected
 directories, and a local subresource only for a page that is itself local
 (an http(s) page loads no local file). A download of a local file outside
-it is refused the same way. The workspace is replaced, never added to, by
-each browser_navigate / browser_tabs (from the tool's own cwd) and cleared
-when the run lets the browser go, so a page left from another run in the
-same engine process or the shared browser cannot load that run's files;
-with no workspace set nothing local opens (the engine's own directory is
-not allowed by default). Anything it cannot decide is refused.
+it is refused the same way, and a file is served from the real path that
+was checked (a link swapped in afterwards is not followed). The workspace
+is replaced, never added to, by each browser_navigate / browser_tabs (from
+the tool's own cwd, once the call passed the live browser's gate) and
+cleared at the end of every agent turn (`runAgent`) and when the run lets
+the browser go; the local pages the turn left go back to about:blank then
+(in the shared live browser, the run's own tabs, including the one kept
+for the owner and the next run). So a page left from another run or turn
+cannot load a later run's files, and a run that only clicks or runs scripts
+(no browser_navigate) opens nothing local. There is one workspace per
+engine process: browser tools of one process running at the same time
+share it (the last call's wins). The engine's own directory is not allowed
+by default. Anything it cannot decide is refused.
 `npm run test:browserFiles` checks it in a real Chromium.
 
 **What the card says.** The title and summary come from what the command
