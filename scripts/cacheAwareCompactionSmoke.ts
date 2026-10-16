@@ -176,11 +176,39 @@ const summaryOf = (marker: string, language: 'en' | 'zh' = 'en') =>
     const cut = await continueConversationForSummary({ record, main: routed(), summarizer: main, request, now: t0 + 1 }).catch((error: Error) => error)
     assert(`preconditions: a summary cut at the output limit is a failure (${JSON.stringify(raw)})`, cut instanceof Error && /cut off/.test(cut.message))
   }
+  answer = { text: summaryOf('MAIN'), raw: { stop_reason: 'end_turn' } }
+  const toolCaller: ChatProvider = { model: 'main-model', async complete() { return { text: '', raw: null, nativeToolCalls: [{ callId: 'c', name: 'read_file', arguments: '{}' }] } } }
   const viaTool = await continueConversationForSummary({
-    record: { ...record!, provider: { model: 'main-model', primaryProvider: main, async complete() { return { text: '', raw: null, nativeToolCalls: [{ callId: 'c', name: 'read_file', arguments: '{}' }] } } } },
-    main: routed(), summarizer: main, request, now: t0 + 1,
+    record: { ...record!, serving: toolCaller },
+    main: { model: 'main-model', primaryProvider: toolCaller, complete: toolCaller.complete }, summarizer: toolCaller, request, now: t0 + 1,
   }).catch((error: Error) => error)
   assert('preconditions: an answer that calls a tool is a failure (no tool choice is forced)', viaTool instanceof Error && /tool/.test(viaTool.message))
+
+  // The router: the summary goes to the candidate that served the recorded request, never through the wrapper's fallback.
+  const fallback: ChatProvider = { model: 'main-model', complete: main.complete }
+  const brokenWrapper = (): ChatProvider => ({ model: 'main-model', primaryProvider: main, async complete() { throw new Error('the wrapper must not be used') } })
+  rememberMainRequest('s3', { provider: brokenWrapper(), model: 'main-model', system, history, requestOptions: {}, sentAt: t0 })
+  const pinned = await continueConversationForSummary({ record: compaction.recallMainRequest('s3', t0 + 1), main: brokenWrapper(), summarizer: main, request, now: t0 + 1 })
+  rememberMainRequest('s4', { provider: { model: 'main-model', primaryProvider: main, lastServingProvider: fallback, complete: main.complete }, model: 'main-model', system, history, requestOptions: {}, sentAt: t0 })
+  const servedByFallback = await continueConversationForSummary({ record: compaction.recallMainRequest('s4', t0 + 1), main: routed(), summarizer: main, request, now: t0 + 1 })
+  const switched = await continueConversationForSummary({ record: compaction.recallMainRequest('s3', t0 + 1), main: { model: 'main-model', primaryProvider: fallback, complete: main.complete }, summarizer: fallback, request, now: t0 + 1 })
+  assert('router: the summary is pinned to the serving candidate; a request answered by a fallback, or a switched first candidate, takes the cold path',
+    pinned.status === 'ok' && servedByFallback.status === 'skipped' && /serving/.test(servedByFallback.reason) && switched.status === 'skipped',
+    JSON.stringify({ pinned, servedByFallback, switched }))
+
+  // Streaming as the main request did (an adapter's max_tokens can depend on it).
+  const ways: string[] = []
+  const streamer: ChatProvider = {
+    model: 'main-model',
+    async complete() { ways.push('complete'); return { text: summaryOf('S'), raw: null } },
+    async completeStream() { ways.push('stream'); return { text: summaryOf('S'), raw: null } },
+  }
+  for (const streamed of [true, false]) {
+    rememberMainRequest('s5', { provider: streamer, model: 'main-model', system, history, requestOptions: {}, streamed, sentAt: t0 })
+    await continueConversationForSummary({ record: compaction.recallMainRequest('s5', t0 + 1), main: streamer, summarizer: streamer, request, now: t0 + 1 })
+  }
+  assert('streaming: the summary streams exactly when the recorded main request did', JSON.stringify(ways) === JSON.stringify(['stream', 'complete']), ways.join(','))
+  for (const id of ['s3', 's4', 's5']) forgetMainRequest(id)
   // Records do not outlive the cache: an expired one is dropped when another session sends.
   rememberMainRequest('s2', { provider: main, system, history, requestOptions: {}, sentAt: t0 + 600_000 })
   assert('records: an expired record is dropped (no tools or images held for quiet sessions)',
@@ -360,7 +388,7 @@ async function withEndpoint(protocol: 'openai' | 'messages', behaviour: Behaviou
       const raw = Buffer.concat(chunks).toString('utf8')
       const body = JSON.parse(raw || '{}') as Body
       // Roughly what a provider would count, so context accounting stays realistic.
-      const promptTokens = Math.ceil(raw.length / 4)
+      const promptTokens = Math.ceil(raw.length / (protocol === 'messages' ? 3 : 4))
       bodies.push(body)
       const kind = kindOf(body)
       const fail = (kind === 'continuation' && behaviour.continuation === 'error') || (kind === 'cold' && behaviour.cold === 'error')
@@ -420,6 +448,9 @@ type Scenario = {
   image?: boolean
   /** An earlier assistant turn with a signed thinking block in the stored history. */
   signedThinking?: boolean
+  /** Main model id (default fake-main-model) and the seeded exchanges (sizes the run to compact once mid-run). */
+  model?: string
+  exchanges?: number
 }
 
 async function runScenario(scenario: Scenario): Promise<{ bodies: Body[]; infos: string[]; stored: SessionMessage[]; reply: string; notices: string[]; remembered: number }> {
@@ -434,7 +465,7 @@ async function runScenario(scenario: Scenario): Promise<{ bodies: Body[]; infos:
     }))
   }
   // Just under the threshold; reading big.txt pushes the next request over it.
-  for (let i = 0; i < (scenario.protocol === 'messages' ? 54 : 50); i += 1) {
+  for (let i = 0; i < (scenario.exchanges ?? (scenario.protocol === 'messages' ? 44 : 50)); i += 1) {
     session.messages.push(msg('user', `question ${i} ${'context '.repeat(180)}`))
     session.messages.push(msg('assistant', `answer ${i} ${'explanation '.repeat(180)}`))
   }
@@ -446,7 +477,7 @@ async function runScenario(scenario: Scenario): Promise<{ bodies: Body[]; infos:
     const make = (model: string): ChatProvider => scenario.protocol === 'openai'
       ? new OpenAICompatibleProvider({ protocol: 'openai', baseUrl, apiKey: 'k', model, ...(scenario.promptCacheMarks ? { promptCacheMarks: true } : {}), ...(scenario.image ? { supportsImages: true } : {}) })
       : new MessagesCompatibleProvider({ protocol: 'messages', baseUrl, apiKey: 'k', model })
-    const provider = make('fake-main-model')
+    const provider = make(scenario.model ?? 'fake-main-model')
     const result = await runAgent(session, 'TASK_CACHE_AWARE: read big.txt and tell me what it holds', {
       cwd,
       provider,
@@ -578,6 +609,20 @@ function prefixReport(bodies: Body[], protocol: 'openai' | 'messages') {
   assert('gateway with a user image: the image stays at the same place inside the shared prefix of the continuation',
     report.ok && imageAt(report.previous) > 0 && imageAt(report.previous) === imageAt(report.continuation) && imageAt(report.previous) <= report.markAt,
     `${report.detail} image=${imageAt(report.previous)}/${imageAt(report.continuation)} mark=${report.markAt}`)
+}
+
+{
+  // An adaptive-thinking model id: the Messages adapter asks for more output when streaming than not.
+  const run = await runScenario({ protocol: 'messages', cacheAware: true, model: 'claude-opus-5-5', exchanges: 34 })
+  const report = prefixReport(run.bodies, 'messages')
+  const prev = report.previous
+  const cont = report.continuation
+  assert('Messages, streamed main request: the continuation streams too, with the same max_tokens and thinking settings',
+    report.ok && prev?.stream === true && cont?.stream === true && typeof prev?.max_tokens === 'number' && cont?.max_tokens === prev?.max_tokens &&
+      // Above the 16K a non-streaming request would get: the summary is not cut where the main turn would not be.
+      prev.max_tokens > 16_000 &&
+      JSON.stringify(cont?.thinking) === JSON.stringify(prev?.thinking) && JSON.stringify(cont?.output_config) === JSON.stringify(prev?.output_config),
+    `${report.detail} max_tokens=${prev?.max_tokens}/${cont?.max_tokens} stream=${prev?.stream}/${cont?.stream}`)
 }
 
 {

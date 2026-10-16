@@ -620,6 +620,11 @@ export interface ChatProvider {
    * serves the request unless it fails). Undefined on a plain provider.
    */
   readonly primaryProvider?: ChatProvider;
+  /**
+   * Routed providers only: the candidate that answered this object's latest
+   * request (the first candidate, or a fallback after it failed).
+   */
+  readonly lastServingProvider?: ChatProvider;
   /** Context window (tokens) of the model behind this provider, when known. */
   readonly contextWindow?: number;
   /** Output tokens this provider reserves per completion (max_tokens), when known. */

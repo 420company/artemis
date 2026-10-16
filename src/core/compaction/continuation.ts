@@ -143,6 +143,13 @@ export function buildContinuationInstruction(input: ContinuationInstructionInput
 /** What the last main request of a session sent, as far as a continuation needs it. */
 export type MainRequestRecord = {
   provider: ChatProvider
+  /**
+   * The provider that answered it (a routed provider's serving candidate):
+   * its cache holds the prefix, and the summary is sent to it alone.
+   */
+  serving: ChatProvider
+  /** Sent streaming: the summary is too, so the adapter's output limit (max_tokens) is the same. */
+  streamed: boolean
   /** Model the request went to (cache entries are per model). */
   model?: string
   /** The system message, exactly as sent. */
@@ -181,6 +188,14 @@ export function rememberMainRequest(sessionId: string, input: {
   system: SessionMessage
   history: readonly SessionMessage[]
   requestOptions: ProviderRequestOptions
+  /** Defaults to the routed provider's serving candidate, else the provider itself. */
+  serving?: ChatProvider
+  /**
+   * Whether it was sent streaming; defaults to whether the provider can
+   * stream. Streaming a summary whose main request did not only gives it
+   * more room (a larger max_tokens), never less.
+   */
+  streamed?: boolean
   sentAt?: number
 }): void {
   const sentAt = input.sentAt ?? Date.now()
@@ -188,6 +203,8 @@ export function rememberMainRequest(sessionId: string, input: {
   lastMainRequests.delete(sessionId)
   lastMainRequests.set(sessionId, {
     provider: input.provider,
+    serving: input.serving ?? input.provider.lastServingProvider ?? input.provider.primaryProvider ?? input.provider,
+    streamed: input.streamed ?? typeof input.provider.completeStream === 'function',
     model: input.model,
     system: input.system,
     history: input.history.map(fingerprintMessage),
@@ -323,8 +340,8 @@ export type ContinueConversationInput = {
 
 /**
  * Send the summary instruction as a continuation of the session's last main
- * request: the same provider object (so the same model, effort, thinking and
- * output settings as that request), system message, tools (and cache-marked
+ * request: the provider that answered it, streaming as it did (so the same
+ * model, effort, thinking and output settings), system message, tools (and cache-marked
  * images), the stored history, then the instruction as a trailing message,
  * so the adapters keep the cache mark on the newest stored message. No
  * request option is changed: no forced tool choice and no smaller
@@ -337,8 +354,10 @@ export async function continueConversationForSummary(input: ContinueConversation
   const now = input.now ?? Date.now()
   if (now - record.sentAt > cacheTtlMs(input.env)) return { status: 'skipped', reason: 'the cached prefix has likely expired' }
   const main = servingProvider(input.main)
-  if (servingProvider(record.provider) !== main || (record.model ?? '') !== (input.main.model ?? '')) {
-    return { status: 'skipped', reason: 'the main provider changed since the last request' }
+  // A router that switched its first candidate, or answered the last request
+  // with a fallback, would read another cache: that is a cold request.
+  if (record.serving !== main || (record.model ?? '') !== (input.main.model ?? '')) {
+    return { status: 'skipped', reason: 'the provider serving the main model changed since the last request' }
   }
   if (!input.onMainModel && servingProvider(input.summarizer) !== main) {
     return { status: 'skipped', reason: 'the summarizer is not the main model' }
@@ -355,10 +374,14 @@ export async function continueConversationForSummary(input: ContinueConversation
     createdAt: new Date(now).toISOString(),
   }
   const messages = [record.system, ...history, instruction]
-  const response = await record.provider.complete(messages, {
-    ...record.requestOptions,
-    ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
-  })
+  const options = { ...record.requestOptions, ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}) }
+  // Pinned to the serving candidate (no fallback to another cache), and
+  // streaming when the main request streamed: an adapter's output limit can
+  // depend on it, and a smaller one would cut the summary off.
+  const serving = record.serving
+  const response = record.streamed && typeof serving.completeStream === 'function'
+    ? await serving.completeStream(messages, () => undefined, options)
+    : await serving.complete(messages, options)
   if (response.nativeToolCalls?.length) throw new Error('the model called a tool instead of writing the summary')
   const truncated = truncationReason(response.raw)
   if (truncated) throw new Error(`the summary was cut off (${truncated})`)

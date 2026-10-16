@@ -621,6 +621,8 @@ function unitChecks(): string[] {
     usageOf('{"usage":{"input_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":300,"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":200},"output_tokens":7}}') ===
       JSON.stringify({ input: 310, output: 7, uncached: 10, cacheRead: 0, cacheWrite: 300, cacheWrite5m: 100, cacheWrite1h: 200 }))
   check('usage: responses API input includes its cached tokens', usageOf('{"usage":{"input_tokens":500,"input_tokens_details":{"cached_tokens":400},"output_tokens":9}}') === JSON.stringify({ input: 500, output: 9, uncached: 100, cacheRead: 400, cacheWrite: 0 }))
+  check('usage: gemini thinking tokens are output',
+    usageOf('{"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"thoughtsTokenCount":300}}') === JSON.stringify({ input: 100, output: 320, uncached: 100, cacheRead: 0, cacheWrite: 0 }))
   check('usage: gemini cached content', usageOf('{"usageMetadata":{"promptTokenCount":300,"cachedContentTokenCount":250,"candidatesTokenCount":4}}') === JSON.stringify({ input: 300, output: 4, uncached: 50, cacheRead: 250, cacheWrite: 0 }))
   check('usage: none', extractUsage('{"choices":[]}') === undefined)
   // Placeholder rates only (never real prices in the repository).
@@ -648,6 +650,11 @@ function unitChecks(): string[] {
   const rule = (extra: Partial<Parameters<typeof shipRule>[0]>) => shipRule({ pairs: 15, diff: 0, se: 0.03, costRatio: 0.85, costDiff: -0.2, costSE: 0.05, new4xx: none, continuations: 10, ...extra }).outcome
   check('ship rule: non-inferior and ≥10% cheaper (beyond the paired cost SE) ships; 5% cheaper does not; cheaper within noise is inconclusive',
     rule({}) === 'ship' && rule({ costRatio: 0.95 }) === 'no-ship' && rule({ costDiff: -0.02 }) === 'inconclusive' && rule({ diff: -0.04, se: 0.02 }) === 'no-ship' && rule({ diff: -0.02, se: 0.02 }) === 'ship')
+  check('ship rule: a broken D (no task completed, or accuracy below the margin) is no-ship even without cost or continuations',
+    rule({ completedA: 6, completedD: 0, costRatio: undefined, continuations: 0, diff: -0.6, se: 0.1 }) === 'no-ship' &&
+      rule({ completedA: 6, completedD: 0, pairs: 1, se: Number.NaN, costRatio: undefined }) === 'no-ship' &&
+      rule({ diff: -0.3, se: 0.05, continuations: 0, costRatio: undefined }) === 'no-ship' &&
+      rule({ completedA: 0, completedD: 0, costRatio: undefined }) === 'inconclusive')
   check('ship rule: better accuracy at ≤5% extra ships; a new 4xx never does, a 429 is not one; too few continuations or unpriced calls are inconclusive',
     rule({ diff: 0.1, costRatio: 1.04, costDiff: 0.01 }) === 'ship' && rule({ diff: 0.1, costRatio: 1.08, costDiff: 0.05 }) === 'no-ship' &&
       rule({ new4xx: { '400 invalid_request_error': 1 } }) === 'no-ship' && rule({ continuations: 2 }) === 'inconclusive' && rule({ unpriced: 3 }) === 'inconclusive' &&

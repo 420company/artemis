@@ -8047,6 +8047,8 @@ async function runAgentInner(
       rememberMainRequest(session.id, {
         provider: activeProvider,
         model: activeProvider.model,
+        // As requestCompletion sent it.
+        streamed: typeof activeProvider.completeStream === 'function' && Boolean(options.onInfo),
         system: providerMessages[0]!,
         history: providerMessages.slice(1, 1 + prepared.sentCount),
         requestOptions: {
