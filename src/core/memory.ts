@@ -1,4 +1,5 @@
 import type { SessionRecord } from './types.js'
+import { isSyntheticUserMessage } from './compaction/language.js'
 import { summarizeOnce } from '../brain.js'
 import { settleCurations, trackCuration } from './backgroundCuration.js'
 import { getMemoryProfile, MemoryEnhancementFactory } from './memoryEnhancement.js'
@@ -55,7 +56,7 @@ export async function compressTrajectory(
   _finalReply: string
 ): Promise<void> {
   try {
-    const msgs = session.messages.filter(m => m.role === 'user' || m.role === 'assistant')
+    const msgs = session.messages.filter(m => (m.role === 'user' && !isSyntheticUserMessage(m)) || m.role === 'assistant')
     if (msgs.length <= 1) return // Too short to have meaningful trajectory habits
 
     const transcript = msgs

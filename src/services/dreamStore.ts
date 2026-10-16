@@ -18,6 +18,8 @@
 
 import path from 'node:path'
 import { resolveArtemisHomeDir, resolveDataRootDir } from '../utils/fs.js'
+import { isSyntheticUserMessage } from '../core/compaction/language.js'
+import type { SessionMessage } from '../core/types.js'
 import { mkdir, readFile, writeFile, readdir, unlink, stat } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 
@@ -451,7 +453,7 @@ async function listWindowSessions(window: DreamActivityWindow = {}): Promise<Win
         const at = timeOf(m?.createdAt) ?? fallback
         if (!inWindow(at)) continue
         lastAt = Math.max(lastAt ?? at, at)
-        if (m?.role === 'user' && typeof m?.content === 'string' && m.content.trim()) {
+        if (m?.role === 'user' && typeof m?.content === 'string' && m.content.trim() && !isSyntheticUserMessage(m as unknown as SessionMessage)) {
           userMessages.push(m.content.replace(/\s+/g, ' ').slice(0, 220))
         }
       }

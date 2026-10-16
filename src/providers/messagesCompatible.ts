@@ -351,6 +351,7 @@ function injectImagesIntoMessages(
   attachments: import('./types.ts').ImageAttachment[],
   supportsImages: boolean,
   targetIndex?: number,
+  asPlaceholders = false,
 ): void {
   let lastUserIdx = targetIndex !== undefined && mapped[targetIndex]?.role === 'user' ? targetIndex : -1;
   for (let i = mapped.length - 1; lastUserIdx < 0 && i >= 0; i -= 1) {
@@ -362,7 +363,9 @@ function injectImagesIntoMessages(
   if (lastUserIdx < 0 || attachments.length === 0) return;
 
   const existing = mapped[lastUserIdx]!.content;
-  const addedBlocks: AnthropicContentBlockObject[] = supportsImages
+  const addedBlocks: AnthropicContentBlockObject[] = asPlaceholders && supportsImages
+    ? attachments.map(() => ({ type: 'text', text: IMAGE_OMITTED_PLACEHOLDER }))
+    : supportsImages
     ? attachments.map((img) => ({
       type: 'image',
       source: { type: 'base64', media_type: img.mediaType, data: img.data },
@@ -556,7 +559,13 @@ export class MessagesCompatibleProvider implements ChatProvider {
       const target = options.imageMessageId
         ? conversation.findIndex((message) => message.id === options.imageMessageId)
         : -1;
-      injectImagesIntoMessages(conversationMessages, options.imageAttachments, this.supportsImages, target >= 0 ? target : undefined);
+      injectImagesIntoMessages(
+        conversationMessages,
+        options.imageAttachments,
+        this.supportsImages,
+        target >= 0 ? target : undefined,
+        options.imagesAsPlaceholders === true,
+      );
     }
     // The breakpoint ends the cached prefix at the newest real message; the
     // per-run context follows it uncached.
@@ -774,8 +783,9 @@ export class MessagesCompatibleProvider implements ChatProvider {
     // abort signal so both cancellation paths reach the socket.
     const idleGuard = createStreamIdleGuard({ externalSignal: options?.abortSignal });
     let sent: Awaited<ReturnType<MessagesCompatibleProvider['postMessages']>>;
+    let imagesOmitted = false;
     try {
-      sent = await this.postMessages(body, options, idleGuard.signal);
+      sent = await this.postMessages(body, options, idleGuard.signal, () => { imagesOmitted = true; });
     } catch (error) {
       idleGuard.dispose();
       throw error;
@@ -790,7 +800,8 @@ export class MessagesCompatibleProvider implements ChatProvider {
       try {
         const json = (await response.json()) as Parameters<typeof parseMessageJson>[0];
         const parsed = parseMessageJson(json);
-        return this.finishResponse(parsed, options, startedAt, undefined, false, this.replayFields(parsed, replay, sent));
+        const result = this.finishResponse(parsed, options, startedAt, undefined, false, this.replayFields(parsed, replay, sent));
+        return imagesOmitted ? { ...result, imagesOmitted: true } : result;
       } finally {
         idleGuard.dispose();
       }
@@ -956,6 +967,7 @@ export class MessagesCompatibleProvider implements ChatProvider {
       usage: streamUsage,
       content,
     });
-    return this.finishResponse(parsed, options, startedAt, firstResponseMs, emittedVisibleText, this.replayFields(parsed, replay, sent));
+    const result = this.finishResponse(parsed, options, startedAt, firstResponseMs, emittedVisibleText, this.replayFields(parsed, replay, sent));
+    return imagesOmitted ? { ...result, imagesOmitted: true } : result;
   }
 }

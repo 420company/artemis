@@ -51,6 +51,9 @@ import {
 import { RUNTIME_CONTEXT_MESSAGE_NAME } from '../src/providers/runtimeContext.js'
 import type { ImageAttachment, ProviderNativeFunctionTool, ProviderRequestOptions, ProviderResponse } from '../src/providers/types.js'
 import { applyProviderOverrides, getMessages, resetSession, think } from '../src/brain.js'
+import { buildScrollBlocksFromMessages, profileSourceMessages } from '../src/cli/interactive.js'
+import { lastOwnerMessageIndex } from '../src/storage/sessionTurns.js'
+import { isChatVisibleMessage } from '../src/storage/sessions.js'
 
 let passed = 0
 let failed = 0
@@ -106,6 +109,10 @@ class FakeMessagesApi {
   rejected = 0
   /** Reject the next request that carries thinking, whatever it holds (an unknown failure). */
   rejectNextThinking = false
+  /** Answer 413 to any request that carries an image. */
+  imagesTooLarge = false
+  /** Models the API does not run the prefix check for (a block it cannot use is dropped, not refused). */
+  readonly uncheckedModels = new Set<string>()
   private produced = new Map<string, { prefix: string; previous: string | null }>()
   private seq = 0
   private server?: http.Server
@@ -147,6 +154,7 @@ class FakeMessagesApi {
         const record = this.produced.get(String(block.signature))
         if (!record) return `${where}: Invalid \`signature\` in \`thinking\` block.`
         const bound = `${where}: Invalid \`signature\` in \`thinking\` block. The block is bound to a different conversation. Remove the block, or set \`thinking.block_binding.prefix_mismatch_behavior\` to "drop_block".`
+        if (this.uncheckedModels.has(String((body as { model?: unknown }).model))) continue
         if (record.prefix !== prefixOf(body, i)) return bound
         // Kept blocks must be an unbroken run: each one follows the block it followed when produced.
         if (previousKept !== undefined && record.previous !== previousKept) return bound
@@ -160,6 +168,11 @@ class FakeMessagesApi {
     const body = JSON.parse(raw || '{}') as Body
     this.bodies.push(body)
     this.rawBodies.push(raw)
+    if (this.imagesTooLarge && body.messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b.type === 'image'))) {
+      res.writeHead(413, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ type: 'error', error: { type: 'request_too_large', message: 'Request exceeds the maximum size' } }))
+      return
+    }
     const carriesThinking = body.messages.some((m) => Array.isArray(m.content) && m.content.some(isThinking))
     const problem = this.rejectNextThinking && carriesThinking
       ? 'messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation.'
@@ -563,6 +576,54 @@ await withApi((body, index) => index < 4 ? readFiles(body, index) : { text: 'don
   )
 })
 
+await withApi((body, index) => index < 4 ? readFiles(body, index) : { text: 'done' }, async (api) => {
+  // A request too large with its images (413) goes with placeholders; later
+  // rounds send the same placeholders, so the loop's thinking stays valid.
+  const conv = new Conversation(provider(api, 'claude-opus-5-5'))
+  const user = conv.ask('Describe this picture, then read the files.')
+  const image = { mediaType: 'image/png', data: 'iVBORw0KGgo=' } as ImageAttachment
+  api.imagesTooLarge = true
+  const first = await conv.round(true, { imageAttachments: [image], imageMessageId: user.id })
+  conv.toolResult('one')
+  await conv.round(false, { imageAttachments: [image], imageMessageId: user.id, imagesAsPlaceholders: first.imagesOmitted === true })
+  const bodies = api.bodies.slice(-2)
+  assert(
+    'images: a streamed 413 is reported (imagesOmitted), and the next round sends the same placeholders with the earlier thinking',
+    first.imagesOmitted === true && api.rejected === 0 && extendsRequest(bodies[1], bodies[0]) &&
+      JSON.stringify(signaturesIn(bodies[1])) === JSON.stringify([signatureOf(conv.assistants()[0])]) &&
+      !JSON.stringify(bodies[1]).includes('"type":"image"'),
+    `omitted=${first.imagesOmitted} rejected=${api.rejected}`,
+  )
+})
+
+// ── Kept runtime notes are never the user's words ───────────────────────────
+
+{
+  const request = msg('user', 'Fix the login bug')
+  const note = contextMessage('TURN_NOTE: playbook for this turn')
+  const reply = msg('assistant', 'Fixed it.')
+  const boundary = msg('user', '[Context compacted · #1] summary', { name: 'compaction_boundary' })
+  const history = [boundary, msg('assistant', 'earlier'), request, note, reply]
+  const shown = buildScrollBlocksFromMessages(history).map((block) => `${block.kind}:${(block as { text?: string }).text ?? ''}`)
+  assert(
+    'cli: the transcript shows the request and the reply, not the kept note (a compaction entry still shows)',
+    !shown.some((line) => line.includes('TURN_NOTE')) && shown.includes('user:Fix the login bug') && shown.some((line) => line.startsWith('user:[Context compacted')),
+    JSON.stringify(shown),
+  )
+  const last = lastOwnerMessageIndex(history)
+  assert(
+    'cli: /undo and /retry find the request, not the note after it (undo cuts before the request, retry resends it)',
+    last === 2 && history.slice(0, last).every((m) => m.id !== request.id && m.id !== note.id) && history[last]!.content === 'Fix the login bug',
+    `last=${last}`,
+  )
+  const profile = profileSourceMessages(history)
+  assert(
+    'cli: the profile curator reads no kept note or compaction entry',
+    !profile.some((m) => m.content.includes('TURN_NOTE') || m.content.includes('Context compacted')) && profile.some((m) => m.content === 'Fix the login bug'),
+  )
+  assert('chat: a kept note is not a chat-visible message', !isChatVisibleMessage(note) && isChatVisibleMessage(request))
+}
+
 // ── Compaction followed by a request ────────────────────────────────────────
 
 async function longToolLoop(api: FakeMessagesApi, model: string, rounds: number): Promise<Conversation> {
@@ -713,8 +774,9 @@ await withApi((body, index) => index < 2 ? readFiles(body, index) : { text: 'don
       ? m.content
       : m.content.map((b) => (b.type === 'text' ? String(b.text) : '')).join('')
     const asked = [...body.messages].reverse().map(textOf).find((t) => t && !t.includes('TURN_NOTE')) ?? ''
-    const answered = body.messages.at(-1)?.role === 'user' && Array.isArray(body.messages.at(-1)!.content) &&
-      (body.messages.at(-1)!.content as Block[]).some((b) => b.type === 'tool_result')
+    const lastReal = [...body.messages].reverse().find((m) => !textOf(m).includes('TURN_NOTE'))
+    const answered = lastReal?.role === 'user' && Array.isArray(lastReal.content) &&
+      (lastReal.content as Block[]).some((b) => b.type === 'tool_result')
     if (!answered && /list/i.test(asked)) {
       toolRound += 1
       return { toolUse: { id: `toolu_ls_${toolRound}`, name: 'list_files', input: { path: '.' } } }
@@ -762,6 +824,24 @@ await withApi((body, index) => index < 2 ? readFiles(body, index) : { text: 'don
       JSON.stringify(signaturesIn(secondTurn.at(-1))) === JSON.stringify(after.slice(0, 3).map(signatureOf)) &&
         getMessages().filter((m) => m.name === RUNTIME_CONTEXT_MESSAGE_NAME).length === 1,
       `sent=${signaturesIn(secondTurn.at(-1))} stored=${after.map(signatureOf)}`,
+    )
+    // Switched to a model that does not check: the kept note stays out of
+    // the history sent; the current context goes last, once.
+    fs.writeFileSync(path.join(cwd, '.artemis', 'providers.json'), JSON.stringify({
+      defaultMainProfileId: 'mock',
+      profiles: [{ id: 'mock', label: 'Mock', protocol: 'messages', apiKey: 'k', model: 'claude-opus-4-8', baseUrl: api.baseUrl, contextLength: 200_000 }],
+    }))
+    api.uncheckedModels.add('claude-opus-4-8')
+    const beforeSwitch = api.bodies.length
+    await think('List the files here', () => {}, options)
+    const switched = api.bodies.slice(beforeSwitch)
+    const notePositions = (body: Body): number[] => body.messages
+      .map((m, i) => (JSON.stringify(m.content).includes('TURN_NOTE') ? i : -1)).filter((i) => i >= 0)
+    assert(
+      'path B: after a switch to a model that does not check, stored notes are not replayed mid-history (only the current context, last)',
+      switched.length > 0 && api.rejected === 0 &&
+        switched.every((body) => JSON.stringify(notePositions(body)) === JSON.stringify([body.messages.length - 1])),
+      JSON.stringify(switched.map(notePositions)),
     )
   } finally {
     process.chdir(originalCwd)

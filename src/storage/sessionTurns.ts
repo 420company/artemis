@@ -87,8 +87,21 @@ function readRecord(session: SessionRecord): LastTurnRecord | undefined {
 }
 
 /** A message the owner wrote (not a runtime note, reminder or compaction entry). */
-function isOwnerMessage(message: SessionMessage): boolean {
+export function isOwnerMessage(message: SessionMessage): boolean {
   return message.role === 'user' && !isSyntheticUserMessage(message) && Boolean(message.content?.trim());
+}
+
+/** Index of the newest message the owner wrote; -1 when there is none. */
+export function lastOwnerMessageIndex(messages: readonly SessionMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (isOwnerMessage(messages[i]!)) return i;
+  }
+  return -1;
+}
+
+/** The messages without the user-role ones the runtime wrote (notes, reminders, compaction entries). */
+export function withoutSyntheticUserMessages<T extends SessionMessage>(messages: readonly T[]): T[] {
+  return messages.filter((message) => !isSyntheticUserMessage(message));
 }
 
 /** Same normalization as the native MCP tool names (core/providerNativeTools.ts). */

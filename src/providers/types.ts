@@ -167,6 +167,12 @@ export type ProviderRequestOptions = {
    */
   imageMessageId?: string;
   /**
+   * Messages provider: an earlier request of this turn had to go without its
+   * images (HTTP 413); send the same placeholders in their place, so the
+   * message reads the same on every round.
+   */
+  imagesAsPlaceholders?: boolean;
+  /**
    * Messages provider: `none` asks for a reply without tool calls while the
    * tools stay declared.
    */
@@ -583,7 +589,7 @@ export type ProviderResponse = {
   /**
    * True when the request was too large (HTTP 413) and was retried with its
    * images replaced by a placeholder, so the model never saw them. Reported
-   * by complete(); callers that need the images treat it as a failure.
+   * by complete() and completeStream(); callers that need the images treat it as a failure.
    */
   imagesOmitted?: boolean;
   usage?: {

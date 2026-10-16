@@ -1750,6 +1750,11 @@ function makeSessionMessage(
 const KEPT_CONTEXT_ID_PREFIX = 'runtime-context-kept-';
 const KEPT_NOTE_ID_PREFIX = 'runtime-note-kept-';
 
+function isKeptRuntimeNote(message: SessionMessage): boolean {
+    return message.name === RUNTIME_CONTEXT_MESSAGE_NAME &&
+        (message.id.startsWith(KEPT_CONTEXT_ID_PREFIX) || message.id.startsWith(KEPT_NOTE_ID_PREFIX));
+}
+
 /** A per-request note sent after the conversation (adapters split it off; never stored). */
 function makeRuntimeContextMessage(content: string): SessionMessage {
     return { id: 'runtime-context-request', role: 'user', name: RUNTIME_CONTEXT_MESSAGE_NAME, content, createdAt: new Date(0).toISOString() };
@@ -2754,11 +2759,16 @@ async function thinkTurn(
         reason: ManageReason,
         nativeFunctionTools: unknown[] | undefined,
     ): Promise<number> => {
-        // + room for the "current task" note when the boundary carries the request.
-        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools) + (requestMessageId ? 80 : 0) +
-            // Kept in the history where replayed thinking is checked (counted there).
-            (keptThinkingRequests() ? 0 : skillIndexTokens + turnContextTokens) +
-            (selfCheckTurn ? estimateTokens(selfCheckTurn.note) + 4 : 0);
+        // Where replayed thinking is checked, the per-request context goes
+        // into the history before measuring, so the measure counts it.
+        const keeping = keptThinkingRequests();
+        if (keeping) keepRequestContext(currentRuntimeNote(), selfCheckTurn);
+        // + room for the "current task" note when the boundary carries the
+        // request (already in the history when it is kept and present).
+        const requestNoteRoom = requestMessageId &&
+            !(keeping && carriedRequestNote(history, requestMessageId, contextLanguage)) ? 80 : 0;
+        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools) + requestNoteRoom +
+            (keeping ? 0 : skillIndexTokens + turnContextTokens + (selfCheckTurn ? estimateTokens(selfCheckTurn.note) + 4 : 0));
         const managed = await manageContext({
             messages: history,
             fixedTokens,
@@ -2777,6 +2787,8 @@ async function thinkTurn(
         });
         if (managed.changed) {
             writeBack(managed.messages);
+            // A compaction can carry the request (a new note) or summarize the kept one away.
+            if (keeping) keepRequestContext(currentRuntimeNote(), selfCheckTurn);
             // A server-side continuation still holds the old, larger history.
             previousResponseId = undefined;
             pendingToolOutputs = undefined;
@@ -2830,6 +2842,8 @@ async function thinkTurn(
         }
     };
     const hasImageAttachments = requestImageAttachments.length > 0;
+    /** A request of this turn went without its images (HTTP 413). */
+    let requestImagesOmitted = false;
     let finalResult: ProviderResponse | null = null;
     let cumulativeUsage: ProviderResponse['usage'] | undefined;
     let emittedFinalText = false;
@@ -2907,6 +2921,7 @@ async function thinkTurn(
             // Thinking the request left out stays out of the history from now on.
             const dropped = dropStoredThinking(history, completion.droppedThinkingMessageIds);
             if (dropped.changed) writeBack(dropped.messages);
+            if (completion.imagesOmitted) requestImagesOmitted = true;
             return { interrupted: false, completion };
         } catch (error) {
             if (interrupted && isAbortLikeError(error)) {
@@ -3038,10 +3053,25 @@ async function thinkTurn(
             appendHistory(makeSessionMessage('user', selfCheck.note, { name: RUNTIME_CONTEXT_MESSAGE_NAME, id: `${KEPT_NOTE_ID_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 9)}` }));
         }
     };
-    /** The request's images; where thinking is kept, on every round and always on the request's own message. */
+    /** The boundary stores a carried request as history; while this turn is going, the runtime note marks it current. */
+    const currentRuntimeNote = (): string =>
+        [turnContextText, skillIndexSection, carriedRequestNote(history, requestMessageId, contextLanguage)].filter(Boolean).join('\n\n');
+    /**
+     * The history as sent. Notes kept for a provider that checks replayed
+     * thinking stay out of requests to any other (after a model switch):
+     * those get the current context after the history instead.
+     */
+    const requestHistory = (): SessionMessage[] =>
+        keptThinkingRequests() ? history : history.filter((message) => !isKeptRuntimeNote(message));
+    /**
+     * The request's images; where thinking is kept, on every round and always
+     * on the request's own message. Once a request had to go without them
+     * (too large), later rounds send the same placeholders.
+     */
     const requestImages = (send: boolean): Record<string, unknown> => ({
         imageAttachments: send && hasImageAttachments ? requestImageAttachments : undefined,
         ...(send && hasImageAttachments && requestMessageId && keptThinkingRequests() ? { imageMessageId: requestMessageId } : {}),
+        ...(send && hasImageAttachments && requestImagesOmitted ? { imagesAsPlaceholders: true } : {}),
     });
 
     nativeRoundLoop:
@@ -3070,20 +3100,18 @@ async function thinkTurn(
                     toolOutputs: pendingToolOutputs,
                 }
                 : {};
-            // The boundary stores a carried request as history; while this
-            // turn is going, an unsaved runtime-context note marks it current.
-            const requestNote = carriedRequestNote(history, requestMessageId, contextLanguage);
-            // Learned-skill index + carried-request note: per request, never stored.
-            // Routed workflow playbook (turnContext) too: per turn, never stored.
-            const runtimeNote = [turnContextText, skillIndexSection, requestNote].filter(Boolean).join('\n\n');
-            // Self-check instructions: per request, never stored, after the history.
+            // Learned-skill index + carried-request note + routed workflow
+            // playbook (turnContext): per request, after the history (kept in
+            // it where replayed thinking is checked, see keepRequestContext).
+            const runtimeNote = currentRuntimeNote();
+            // Self-check instructions: per request, after the history.
             const requestContext = [runtimeNote, selfCheckTurn?.note].filter(Boolean).join('\n\n');
             const keepsThinking = keptThinkingRequests();
             if (keepsThinking) keepRequestContext(runtimeNote, selfCheckTurn);
             return {
                 messages: requestContext && !keepsThinking
-                    ? [...systemMessages, ...history, makeRuntimeContextMessage(requestContext)]
-                    : [...systemMessages, ...history],
+                    ? [...systemMessages, ...requestHistory(), makeRuntimeContextMessage(requestContext)]
+                    : [...systemMessages, ...requestHistory()],
                 completionOptions: {
                     ...responseContinuation,
                     nativeFunctionTools,
@@ -3141,7 +3169,7 @@ async function thinkTurn(
                 const finalizerKeepsThinking = keptThinkingRequests();
                 const forcedAttempt = await requestWithOverflowRecovery(
                     () => ({
-                        messages: [...systemMessages, ...history, finalizerMessage],
+                        messages: [...systemMessages, ...requestHistory(), finalizerMessage],
                         completionOptions: {
                             ...(finalizerKeepsThinking
                                 ? { nativeFunctionTools, toolChoice: 'none', ...requestImages(true) }

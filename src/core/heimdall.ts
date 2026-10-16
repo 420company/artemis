@@ -2,6 +2,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { appendFile, readFile, writeFile } from 'node:fs/promises';
 import { getCompactionSummary } from './compaction/index.js';
+import { isSyntheticUserMessage } from './compaction/language.js';
 import type {
   AgentAction,
   AgentPhase,
@@ -231,7 +232,7 @@ function deriveClarificationState(
   let lastAssistantIndex = -1;
   for (let index = session.messages.length - 1; index >= 0; index -= 1) {
     const message = session.messages[index];
-    if (lastUserIndex < 0 && message?.role === 'user') {
+    if (lastUserIndex < 0 && message?.role === 'user' && !isSyntheticUserMessage(message)) {
       lastUserIndex = index;
     }
     if (lastAssistantIndex < 0 && message?.role === 'assistant') {

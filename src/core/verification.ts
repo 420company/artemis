@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { buildVerificationChecklist } from './evidence.js';
+import { isSyntheticUserMessage } from './compaction/language.js';
 import type {
   AgentAction,
   EvidenceGraph,
@@ -226,7 +227,7 @@ function collectUserInputs(sessions: SessionRecord[]): string[] {
 
   for (const session of sessions) {
     for (const message of session.messages) {
-      if (message.role !== 'user') {
+      if (message.role !== 'user' || isSyntheticUserMessage(message)) {
         continue;
       }
 

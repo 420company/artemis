@@ -39,6 +39,7 @@ import {
 } from '../src/storage/sessionTurns.js'
 import { parseArgs } from '../src/cli/parseArgs.js'
 import { runSessionCommand } from '../src/cli/runCli.js'
+import { runRetryCommand } from '../src/cli/retryCommand.js'
 
 class ExitSignal extends Error {}
 
@@ -297,6 +298,23 @@ console.log('\nheadless retry')
       const afterEdit = await new SessionStore(cwd).load(sessionId, { fresh: true })
       const edited = afterEdit.messages.filter((m) => m.role === 'user' && /QUESTION/.test(m.content)).map((m) => m.content)
       assert('edit and resend replaces the last message', JSON.stringify(edited) === JSON.stringify(['QUESTION_ONE', 'QUESTION_EDITED']) && asked.includes('QUESTION_EDITED'), JSON.stringify(edited))
+
+      // A runtime note kept after the request (path B, models that check
+      // replayed thinking) is not the message a retry reports or re-runs.
+      {
+        const withNote = await new SessionStore(cwd).load(sessionId, { fresh: true })
+        const requestAt = withNote.messages.map((m) => m.content).lastIndexOf('QUESTION_EDITED')
+        withNote.messages.splice(requestAt + 1, 0, {
+          id: 'runtime-context-kept-test', role: 'user', name: 'runtime_context',
+          content: 'RUNTIME_NOTE_NOT_THE_USER', createdAt: new Date().toISOString(),
+        })
+        await new SessionStore(cwd).save(withNote)
+        asked.length = 0
+        const retriedWithNote = await runRetryCommand({ cwd, sessionId })
+        assert('retry with a kept runtime note after the request reports and re-runs the request, not the note',
+          retriedWithNote.retriedPrompt === 'QUESTION_EDITED' && asked.includes('QUESTION_EDITED'),
+          `${retriedWithNote.retriedPrompt} ${JSON.stringify(asked)}`)
+      }
       const visible = afterEdit.messages.filter((m) => m.role === 'assistant' && m.content.trim())
       assert('the replaced reply is gone', !visible.some((m) => /QUESTION_TWO/.test(m.content)), JSON.stringify(visible.map((m) => m.content)))
 
