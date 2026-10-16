@@ -203,6 +203,9 @@ import { stat, unlink } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { think, resetSession, getMessages, getActiveContextState, restoreSession, restoreSessionStateForCwd, setSystemPromptSuffix, applyProviderOverrides, switchModel, switchEffort, getCurrentEffort, getLastPromptTokens, getBifrostContextAuditReport, getCompressionSummary } from '../brain.js'
 import type { ThinkOptions } from '../brain.js'
+import { lastOwnerMessageIndex, withoutSyntheticUserMessages } from '../storage/sessionTurns.js'
+import { isSyntheticUserMessage } from '../core/compaction/language.js'
+import { isCompactionBoundary } from '../core/compaction/manager.js'
 import { type SlashMenuItem } from './prompt.js'
 import { pickKaomoji } from './kaomoji.js'
 import { createBlessedPrompt, type BlessedPromptHandle } from './blessedPrompt.js'
@@ -551,11 +554,14 @@ type ScrollViewportController = {
   onWorkflowComplete?(ctx: { outputDir?: string; changedFiles: string[]; mode: WorkflowMode }): void
 }
 
-function buildScrollBlocksFromMessages(messages: SessionMessage[]): ScrollBlock[] {
+export function buildScrollBlocksFromMessages(messages: SessionMessage[]): ScrollBlock[] {
   const blocks: ScrollBlock[] = []
   for (const msg of messages) {
     if (msg.role === 'system') continue
     if (msg.role === 'user') {
+      // Runtime notes kept in the history for the model are not the user's
+      // words; a compaction entry still shows (it says what happened).
+      if (isSyntheticUserMessage(msg) && !isCompactionBoundary(msg)) continue
       blocks.push({ kind: 'user', text: userVisibleMessageText(msg.content), timestamp: timestampFor(msg.createdAt) || undefined })
       continue
     }
@@ -3285,11 +3291,8 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         appendSystemPanel(t('无法撤回', 'Cannot undo'), [t('当前会话没有历史记录。', 'Conversation is empty.')])
         continue
       }
-      // Find last user message index
-      let lastUserIdx = -1
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'user') { lastUserIdx = i; break }
-      }
+      // The last message the user wrote (runtime notes after it go with it)
+      const lastUserIdx = lastOwnerMessageIndex(msgs)
       
       if (lastUserIdx === -1) {
         restoreSession([])
@@ -3310,15 +3313,9 @@ export async function runInteractive(opts: RunInteractiveOptions): Promise<void>
         continue
       }
       
-      let lastUserMsg: string | undefined
-      let lastUserIdx = -1
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'user') {
-          lastUserMsg = msgs[i].content
-          lastUserIdx = i
-          break
-        }
-      }
+      // The last message the user wrote, not a runtime note kept after it
+      const lastUserIdx = lastOwnerMessageIndex(msgs)
+      const lastUserMsg: string | undefined = lastUserIdx >= 0 ? msgs[lastUserIdx]!.content : undefined
 
       if (!lastUserMsg) {
         appendSystemPanel(t('无法重试', 'Cannot retry'), [t('未找到用户输入。', 'No user message found to retry.')])
@@ -5090,6 +5087,11 @@ function renderHelp(locale: UiLocale): string {
   ].join('\n')
 }
 
+/** What the profile curator reads: the conversation without runtime notes kept as user messages. */
+export function profileSourceMessages(messages: SessionMessage[]): Array<{ role: string; content: string }> {
+  return withoutSyntheticUserMessages(messages).map((m) => ({ role: m.role, content: m.content }))
+}
+
 /**
  * Fire-and-forget user profile auto-update.
  * Called on session exit / clear. Never throws — errors are silently ignored.
@@ -5100,7 +5102,7 @@ async function updateUserProfileSilent(
 ): Promise<void> {
   try {
     const existing = await loadUserProfile()
-    const recentMessages = messages.map((m: any) => ({ role: m.role, content: m.content }))
+    const recentMessages = profileSourceMessages(messages)
     const updated = await autoUpdateUserProfile({
       recentMessages,
       existingProfile: existing,

@@ -797,7 +797,7 @@ async function main(): Promise<void> {
     assert.match(interactive, /workflowPlaybook \? \{ turnContext: workflowPlaybook \}/);
     assert.ok(!interactive.includes('--- USER REQUEST ---'), 'the playbook is never part of the stored user message');
     const brain = fs.readFileSync(path.join(process.cwd(), 'src/brain.ts'), 'utf8');
-    assert.match(brain, /const runtimeNote = \[turnContextText, skillIndexSection, requestNote\]/, 'think() sends turnContext as unsaved runtime context');
+    assert.match(brain, /const currentRuntimeNote = \(\): string =>\s*\[turnContextText, skillIndexSection, carriedRequestNote\(/, 'think() sends turnContext as unsaved runtime context');
     const headless = fs.readFileSync(path.join(process.cwd(), 'src/services/headlessAgent.ts'), 'utf8');
     assert.match(headless, /delegationBudget: createDelegationBudget\(plan\.workflow\)/, 'every headless run (Goal Mode, analysis too) is bounded');
   });

@@ -1,5 +1,6 @@
 import { searchWeb, createSearchAction, executeSearchAction, type SearchResponse, type SearchBackend, type SearchOptions } from './searchTools.js';
 import type { AgentAction, SessionMessage } from './types.js';
+import { isSyntheticUserMessage } from './compaction/language.js';
 
 /**
  * 搜索工具管理器
@@ -65,7 +66,7 @@ export class SearchToolManager {
     const queries: string[] = [];
 
     for (const message of messages) {
-      if (message.role === 'user' && message.content) {
+      if (message.role === 'user' && message.content && !isSyntheticUserMessage(message)) {
         // 简单的搜索查询提取逻辑
         const searchPatterns = [
           /搜索\s*(.*?)(?:的|关于|for|on)?\s*(?:结果)?/g,

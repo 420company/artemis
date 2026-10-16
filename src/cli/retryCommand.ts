@@ -20,6 +20,7 @@
 
 import { runHeadlessAgent, type HeadlessAgentOptions, type HeadlessAgentResult } from '../services/headlessAgent.js'
 import { SessionStore } from '../storage/sessions.js'
+import { lastOwnerMessageIndex } from '../storage/sessionTurns.js'
 
 export interface RetryCommandOptions {
   cwd: string
@@ -87,14 +88,9 @@ export async function runRetryCommand(options: RetryCommandOptions): Promise<Ret
   try {
     const session = await store.load(sessionId)
     const messages = session?.messages ?? []
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i]
-      const content = m.content
-      if (m.role === 'user' && typeof content === 'string' && content.trim()) {
-        retriedPrompt = snippet(content)
-        break
-      }
-    }
+    // The owner's own message, not a runtime note kept after it.
+    const index = lastOwnerMessageIndex(messages)
+    if (index >= 0) retriedPrompt = snippet(messages[index]!.content)
   } catch {
     // Best-effort only: the retry itself is authoritative.
   }

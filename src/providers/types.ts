@@ -161,6 +161,23 @@ export type ProviderRequestOptions = {
    */
   imageAttachments?: ImageAttachment[];
   /**
+   * Messages provider: the stored message the images belong to (default: the
+   * newest user message). Lets every round of a tool loop send them on the
+   * same message, so the prefix later thinking is bound to stays the same.
+   */
+  imageMessageId?: string;
+  /**
+   * Messages provider: an earlier request of this turn had to go without its
+   * images (HTTP 413); send the same placeholders in their place, so the
+   * message reads the same on every round.
+   */
+  imagesAsPlaceholders?: boolean;
+  /**
+   * Messages provider: `none` asks for a reply without tool calls while the
+   * tools stay declared.
+   */
+  toolChoice?: 'none';
+  /**
    * The same images, for a provider with prompt cache marks: each group in a
    * user message of its own right after the stored message it was first sent
    * after (`afterMessageId`; at the end of the history when that message is
@@ -558,6 +575,18 @@ export type ProviderResponse = {
    */
   rawContentBlocks?: any[];
   /**
+   * Digest of the prefix the reply's thinking was produced against; stored
+   * on the assistant message as `thinkingBinding` (Messages provider, models
+   * that check replayed thinking).
+   */
+  thinkingBinding?: string;
+  /**
+   * Stored assistant turns whose thinking blocks this request left out (the
+   * history before them changed, or the API rejected them). The caller
+   * removes those blocks from its history: once left out, they stay out.
+   */
+  droppedThinkingMessageIds?: string[];
+  /**
    * True when `text` was emitted incrementally via the stream callback during
    * the call (real SSE). False or undefined means the caller is responsible
    * for emitting `text` if it wants users to see it. This distinction matters
@@ -569,7 +598,7 @@ export type ProviderResponse = {
   /**
    * True when the request was too large (HTTP 413) and was retried with its
    * images replaced by a placeholder, so the model never saw them. Reported
-   * by complete(); callers that need the images treat it as a failure.
+   * by complete() and completeStream(); callers that need the images treat it as a failure.
    */
   imagesOmitted?: boolean;
   usage?: {

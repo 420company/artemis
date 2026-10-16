@@ -259,7 +259,9 @@ const RECOVERY_MESSAGE_HEADER = '═══ 压缩后上下文恢复 ═══';
 
 export function isRecoveryMessage(message: SessionMessage): boolean {
   return message.id.startsWith(RECOVERY_MESSAGE_ID_PREFIX)
-    || message.content.startsWith(RECOVERY_MESSAGE_HEADER);
+    || message.content.startsWith(RECOVERY_MESSAGE_HEADER)
+    // Runtime context kept in the history: not what the user asked for either.
+    || message.name === 'runtime_context';
 }
 
 function getLatestUserInput(messages: SessionMessage[]): string {

@@ -383,6 +383,8 @@ const MAX_SHOWN_CHARS = 100_000;
 export function isChatVisibleMessage(message: SessionMessage): boolean {
   // A progress message the agent posted mid-run (core/agentUpdates.ts).
   if (message.role === 'tool') return typeof message.agentUpdate?.text === 'string' && message.agentUpdate.text.trim().length > 0;
+  // Runtime context kept in the history for the model, never written by the user.
+  if (message.name === 'runtime_context') return false;
   return (message.role === 'user' || message.role === 'assistant') &&
     typeof message.content === 'string' && message.content.trim().length > 0;
 }
@@ -404,6 +406,7 @@ function projectChatMessage(message: SessionMessage): ChatHistoryMessage {
   const {
     toolCalls: _toolCalls,
     rawContentBlocks: _raw,
+    thinkingBinding: _binding,
     contentBlocks: _blocks,
     reasoningContent: _reasoning,
     ...rest

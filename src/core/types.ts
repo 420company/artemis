@@ -33,6 +33,13 @@ export type SessionMessage = {
    */
   rawContentBlocks?: any[];
   /**
+   * Digest of the request prefix this turn's thinking blocks were produced
+   * against (providers/thinkingReplay.ts). On models that check it, the
+   * blocks are replayed only while the prefix sent before them still has
+   * this digest.
+   */
+  thinkingBinding?: string;
+  /**
    * Set on the synthetic message that replaces summarized history after a
    * context compaction (see core/compaction). It always sits at index 0.
    */

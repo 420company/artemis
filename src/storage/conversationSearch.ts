@@ -181,13 +181,15 @@ async function sessionsWithArchivedMatch(cwd: string, query: string, wanted: num
     }
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
-      let message: { role?: unknown; content?: unknown } | undefined;
+      let message: { role?: unknown; content?: unknown; name?: unknown } | undefined;
       try {
-        message = (JSON.parse(line) as { message?: { role?: unknown; content?: unknown } }).message;
+        message = (JSON.parse(line) as { message?: { role?: unknown; content?: unknown; name?: unknown } }).message;
       } catch {
         continue;
       }
       if ((message?.role !== 'user' && message?.role !== 'assistant') || typeof message.content !== 'string') continue;
+      // Runtime context kept in the history: never the user's words.
+      if (message.name === 'runtime_context') continue;
       const text = message.role === 'user' ? userVisibleMessageText(message.content) : message.content;
       if (matchText(text, query)) {
         found.push(archive.id);
