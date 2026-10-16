@@ -262,8 +262,38 @@ export interface ToolEvent {
 
 export interface Usage {
   requests: number
+  /** Every input token sent (uncached + cache reads + cache writes): the context size. */
   inputTokens: number
   outputTokens: number
+  /** Input billed at the normal input rate: neither read from nor written to a cache. */
+  uncachedInputTokens?: number
+  /** Input read from the provider's prompt cache. */
+  cacheReadTokens?: number
+  /** Input written to the cache; the 5-minute / 1-hour parts when the provider reports them. */
+  cacheWriteTokens?: number
+  cacheWrite5mTokens?: number
+  cacheWrite1hTokens?: number
+  /** Compaction summary requests (cold summarizer or continuation) and their input tokens. */
+  summarizerRequests?: number
+  summarizerInputTokens?: number
+  /** Failed model requests by kind: "400 invalid_request_error", "429", "stream overloaded_error", "network". */
+  apiErrors?: Record<string, number>
+  /** Priced with the rate table (live runs with prices); left out of a total that has unpriced calls. */
+  costUsd?: number
+  /** Calls whose model has no rates: the cost of anything that includes them is "unpriced", never $0. */
+  unpricedRequests?: number
+  /** Cost of the compaction summary requests alone. */
+  summarizerCostUsd?: number
+}
+
+/** Context compactions of a task: tier 1 (old tool results cleared), tier 2 (summarized), and how tier 2 was written. */
+export interface CompactionCounts {
+  tier1: number
+  tier2: number
+  /** Tier-2 summaries by path, when the engine logs it (cache-aware option on): continuation, cold, mechanical, reused. */
+  paths?: Record<string, number>
+  /** Tier 2 with the mechanical summary (the summarizer failed or was skipped). */
+  mechanical: number
 }
 
 export interface TranscriptEntry {
@@ -295,6 +325,8 @@ export interface TurnTrace {
   events?: string[]
   /** Hosts the mock-mode network guard refused. */
   blockedHosts: string[]
+  /** Tier-2 summary paths the engine logged (`[context] summary path=…`), in order. */
+  summaryPaths?: string[]
   error?: string
   infoTail: string[]
 }
@@ -329,6 +361,7 @@ export interface TaskResult {
   turns: TurnTrace[]
   usage: Usage
   costUsd?: number
+  compactions?: CompactionCounts
   durationMs: number
   judge?: JudgeOutcome
   error?: string
@@ -352,6 +385,7 @@ export interface RunSummary {
   byCategory: Record<string, CategorySummary>
   usage: Usage
   costUsd?: number
+  compactions?: CompactionCounts
   wallMs: number
 }
 
@@ -363,6 +397,8 @@ export interface RunResults {
   git?: { commit?: string; branch?: string; dirty?: boolean }
   provider?: { model?: string; protocol?: string; host?: string; worker?: string }
   options: Record<string, unknown>
+  /** Live runs with rates: what the dollar budget was charged (unpriced calls at the highest rates). */
+  budgetSpentUsd?: number
   summary: RunSummary
   tasks: TaskResult[]
 }

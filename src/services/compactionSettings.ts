@@ -13,6 +13,14 @@
  * The context cap then follows resolveMaxContextTokens: the user's own
  * setting > ARTEMIS_MAX_CONTEXT_TOKENS (the platform's per-tier budget) >
  * the mode default (200K hosted, none interactive).
+ *
+ * Cache-aware summaries (cacheAwareSummary, default off):
+ * ARTEMIS_CACHE_AWARE_SUMMARY (1/0/main) > the stores > off. The variable
+ * wins so an operator or an A/B eval can switch it per process. "main"
+ * writes these summaries with the main model even when a separate
+ * summarizer (worker) is configured; `true` keeps the cold path then.
+ * Hosted runs only (runAgent); the interactive CLI and bridges (think())
+ * ignore it.
  */
 
 import { parseContextCap, resolveMaxContextTokens, type ContextCapMode } from '../core/compaction/index.js'
@@ -22,6 +30,20 @@ export type CompactionSettings = {
   enabled?: boolean
   thresholdRatio?: number
   maxContextTokens?: number
+  /** Tier-2 summaries continue the main conversation's cached prefix (see core/compaction/continuation.ts). */
+  cacheAwareSummary?: true | 'main'
+}
+
+export const CACHE_AWARE_SUMMARY_ENV = 'ARTEMIS_CACHE_AWARE_SUMMARY'
+
+/** ARTEMIS_CACHE_AWARE_SUMMARY: 1/0 (and true/false, on/off, yes/no) or "main"; undefined when unset or not recognised. */
+export function parseCacheAwareSummaryEnv(raw: string | undefined): boolean | 'main' | undefined {
+  const value = raw?.trim().toLowerCase()
+  if (!value) return undefined
+  if (value === 'main') return 'main'
+  if (['1', 'true', 'on', 'yes'].includes(value)) return true
+  if (['0', 'false', 'off', 'no'].includes(value)) return false
+  return undefined
 }
 
 /**
@@ -49,6 +71,8 @@ export async function resolveCompressionSettings(cwd: string): Promise<ExplicitC
   if (threshold !== undefined) resolved.threshold = threshold
   const cap = layers.find((layer) => layer.maxContextTokens !== undefined && parseContextCap(layer.maxContextTokens) !== undefined)
   if (cap) resolved.maxContextTokens = cap.maxContextTokens
+  const cacheAware = layers.find((layer) => layer.cacheAwareSummary !== undefined)?.cacheAwareSummary
+  if (cacheAware !== undefined) resolved.cacheAwareSummary = cacheAware
   return resolved
 }
 
@@ -58,9 +82,11 @@ export async function loadCompactionSettings(
   env: Record<string, string | undefined> = process.env,
 ): Promise<CompactionSettings> {
   const compression = await resolveCompressionSettings(cwd)
+  const cacheAwareSummary = parseCacheAwareSummaryEnv(env[CACHE_AWARE_SUMMARY_ENV]) ?? compression.cacheAwareSummary ?? false
   return {
     enabled: compression.enabled,
     thresholdRatio: compression.threshold,
     maxContextTokens: resolveMaxContextTokens({ configured: compression.maxContextTokens, mode, env }),
+    ...(cacheAwareSummary ? { cacheAwareSummary: cacheAwareSummary === 'main' ? 'main' as const : true as const } : {}),
   }
 }
