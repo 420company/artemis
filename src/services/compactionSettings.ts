@@ -15,8 +15,12 @@
  * the mode default (200K hosted, none interactive).
  *
  * Cache-aware summaries (cacheAwareSummary, default off):
- * ARTEMIS_CACHE_AWARE_SUMMARY (1/0) > the stores > off. The variable wins
- * so an operator or an A/B eval can switch it per process.
+ * ARTEMIS_CACHE_AWARE_SUMMARY (1/0/main) > the stores > off. The variable
+ * wins so an operator or an A/B eval can switch it per process. "main"
+ * writes these summaries with the main model even when a separate
+ * summarizer (worker) is configured; `true` keeps the cold path then.
+ * Hosted runs only (runAgent); the interactive CLI and bridges (think())
+ * ignore it.
  */
 
 import { parseContextCap, resolveMaxContextTokens, type ContextCapMode } from '../core/compaction/index.js'
@@ -27,15 +31,16 @@ export type CompactionSettings = {
   thresholdRatio?: number
   maxContextTokens?: number
   /** Tier-2 summaries continue the main conversation's cached prefix (see core/compaction/continuation.ts). */
-  cacheAwareSummary?: boolean
+  cacheAwareSummary?: true | 'main'
 }
 
 export const CACHE_AWARE_SUMMARY_ENV = 'ARTEMIS_CACHE_AWARE_SUMMARY'
 
-/** ARTEMIS_CACHE_AWARE_SUMMARY as a switch: undefined when unset or not a recognised value. */
-export function parseCacheAwareSummaryEnv(raw: string | undefined): boolean | undefined {
+/** ARTEMIS_CACHE_AWARE_SUMMARY: 1/0 (and true/false, on/off, yes/no) or "main"; undefined when unset or not recognised. */
+export function parseCacheAwareSummaryEnv(raw: string | undefined): boolean | 'main' | undefined {
   const value = raw?.trim().toLowerCase()
   if (!value) return undefined
+  if (value === 'main') return 'main'
   if (['1', 'true', 'on', 'yes'].includes(value)) return true
   if (['0', 'false', 'off', 'no'].includes(value)) return false
   return undefined
@@ -82,6 +87,6 @@ export async function loadCompactionSettings(
     enabled: compression.enabled,
     thresholdRatio: compression.threshold,
     maxContextTokens: resolveMaxContextTokens({ configured: compression.maxContextTokens, mode, env }),
-    ...(cacheAwareSummary ? { cacheAwareSummary: true } : {}),
+    ...(cacheAwareSummary ? { cacheAwareSummary: cacheAwareSummary === 'main' ? 'main' as const : true as const } : {}),
   }
 }

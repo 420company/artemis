@@ -154,6 +154,25 @@ export function priceUsage(table: PriceTable, model: string | undefined, usage: 
   ) / 1_000_000
 }
 
+/**
+ * USD of usage priced at the highest rate of each kind in the table: what a
+ * dollar budget charges for a call whose model has no rates, so an unpriced
+ * call can never run past the budget unseen.
+ */
+export function priceAtHighestRates(table: PriceTable, usage: BillableUsage): number {
+  const all = [...Object.values(table.models), ...(table.default ? [table.default] : [])]
+  const max = (pick: (rates: ModelRates) => number) => Math.max(0, ...all.map(pick))
+  const input = max((r) => r.input)
+  const highest: ModelRates = {
+    input,
+    output: max((r) => r.output),
+    cacheRead: max((r) => r.cacheRead ?? r.input),
+    cacheWrite: max((r) => r.cacheWrite ?? r.input),
+    cacheWrite1h: max((r) => r.cacheWrite1h ?? r.cacheWrite ?? r.input),
+  }
+  return priceUsage({ models: {}, default: highest, source: 'highest' }, undefined, usage)!
+}
+
 /** Share of input tokens read from the cache (0 when nothing was sent). */
 export function cacheHitRatio(usage: Usage): number {
   return usage.inputTokens > 0 ? (usage.cacheReadTokens ?? 0) / usage.inputTokens : 0

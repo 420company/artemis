@@ -278,8 +278,12 @@ export interface Usage {
   summarizerInputTokens?: number
   /** Failed model requests by kind: "400 invalid_request_error", "429", "stream overloaded_error", "network". */
   apiErrors?: Record<string, number>
-  /** Priced with the rate table (live runs with prices). */
+  /** Priced with the rate table (live runs with prices); left out of a total that has unpriced calls. */
   costUsd?: number
+  /** Calls whose model has no rates: the cost of anything that includes them is "unpriced", never $0. */
+  unpricedRequests?: number
+  /** Cost of the compaction summary requests alone. */
+  summarizerCostUsd?: number
 }
 
 /** Context compactions of a task: tier 1 (old tool results cleared), tier 2 (summarized), and how tier 2 was written. */
@@ -393,6 +397,8 @@ export interface RunResults {
   git?: { commit?: string; branch?: string; dirty?: boolean }
   provider?: { model?: string; protocol?: string; host?: string; worker?: string }
   options: Record<string, unknown>
+  /** Live runs with rates: what the dollar budget was charged (unpriced calls at the highest rates). */
+  budgetSpentUsd?: number
   summary: RunSummary
   tasks: TaskResult[]
 }

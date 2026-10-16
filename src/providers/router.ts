@@ -519,6 +519,10 @@ export async function createProviderRouter(
         get model() {
           return rankForTarget(buildCandidates())[0]?.provider.model;
         },
+        // The candidate this target tries first: whose prompt cache a request reads.
+        get primaryProvider() {
+          return rankForTarget(buildCandidates())[0]?.provider;
+        },
         // The window of the provider this target tries first.
         get contextLength() {
           return rankForTarget(buildCandidates())[0]?.provider.contextLength;

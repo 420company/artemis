@@ -3,7 +3,8 @@
  * scripts/evalZhAB.ts — A/B experiment for cache-aware compaction summaries.
  *
  *   A  current behaviour (ARTEMIS_CACHE_AWARE_SUMMARY=0)
- *   D  tier-2 summaries continue the cached main conversation (ARTEMIS_CACHE_AWARE_SUMMARY=1)
+ *   D  tier-2 summaries continue the cached main conversation (ARTEMIS_CACHE_AWARE_SUMMARY=1,
+ *      or =main with --d-mode main: also when a separate summarizer model is configured)
  *
  * Both arms run the long eval tasks under a small context cap
  * (ARTEMIS_MAX_CONTEXT_TOKENS, default 60000) so they compact, in alternating
@@ -23,7 +24,10 @@
  *   --model <id>            dry run: whose rates to estimate with (default: the table's default rate)
  *   --estimate-from <path>  dry run: per-task tokens from an earlier live result file/directory instead of the mock
  *   --providers <file>      live: providers.json to use (as for eval:zh)
- *   --budget-usd X          live: stop the experiment past $X in total (split evenly over the arm runs)
+ *   --budget-usd X          live (required): stop the experiment past $X in total; every call counts
+ *                           (unpriced ones at the highest rates); each arm run gets what is left ÷ runs left
+ *   --d-mode 1|main         D's ARTEMIS_CACHE_AWARE_SUMMARY (default 1; "main" when a worker summarizer is configured)
+ *   --margin X              non-inferiority margin on accuracy, 0-1 (default 0.05)
  *   --out <dir>             default evals/results/ab-<timestamp>
  *
  * See evals/zh/README.md ("A/B: cache-aware compaction summaries").
@@ -59,6 +63,8 @@ interface Options {
   estimateFrom?: string
   providers?: string
   budgetUsd?: number
+  dMode: '1' | 'main'
+  margin?: number
   out: string
 }
 
@@ -87,8 +93,8 @@ function parseOptions(argv: string[]): Options {
   const compareAt = argv.indexOf('--compare')
   const compare = compareAt >= 0 ? [argv[compareAt + 1], argv[compareAt + 2]] : undefined
   if (compare && (!compare[0] || !compare[1])) throw new Error('--compare needs two paths: <A> <D>')
-  const known = new Set(['--live', '--mock', '--compare', '--dry-run', '--tasks', '--repeat', '--context-tokens', '--prices', '--model', '--estimate-from', '--providers', '--budget-usd', '--out'])
-  const valued = new Set(['--tasks', '--repeat', '--context-tokens', '--prices', '--model', '--estimate-from', '--providers', '--budget-usd', '--out'])
+  const known = new Set(['--live', '--mock', '--compare', '--dry-run', '--tasks', '--repeat', '--context-tokens', '--prices', '--model', '--estimate-from', '--providers', '--budget-usd', '--d-mode', '--margin', '--out'])
+  const valued = new Set(['--tasks', '--repeat', '--context-tokens', '--prices', '--model', '--estimate-from', '--providers', '--budget-usd', '--d-mode', '--margin', '--out'])
   argv.forEach((arg, i) => {
     if (compareAt >= 0 && (i === compareAt + 1 || i === compareAt + 2)) return
     if (valued.has(argv[i - 1] ?? '')) return
@@ -105,23 +111,77 @@ function parseOptions(argv: string[]): Options {
     estimateFrom: valueOf('--estimate-from'),
     providers: valueOf('--providers'),
     budgetUsd: numberOf('--budget-usd'),
+    dMode: dModeOf(valueOf('--d-mode')),
+    margin: numberOf('--margin'),
     out: path.resolve(valueOf('--out') ?? path.join(REPO, 'evals', 'results', `ab-${new Date().toISOString().replace(/[:.]/g, '-')}`)),
   }
 }
 
-const ARM_ENV: Record<Arm, string> = { A: '0', D: '1' }
-
-function armEnv(arm: Arm, options: Options): NodeJS.ProcessEnv {
-  return { ...process.env, ARTEMIS_MAX_CONTEXT_TOKENS: String(options.contextTokens), ARTEMIS_CACHE_AWARE_SUMMARY: ARM_ENV[arm] }
+function dModeOf(raw: string | undefined): '1' | 'main' {
+  if (raw === undefined || raw === '1') return '1'
+  if (raw === 'main') return 'main'
+  throw new Error(`--d-mode: 1 or main, not ${raw}`)
 }
 
-function evalArgs(mode: 'live' | 'mock', options: Options, out: string, runs: number): string[] {
+const armValue = (arm: Arm, options: Options) => (arm === 'A' ? '0' : options.dMode)
+
+function armEnv(arm: Arm, options: Options): NodeJS.ProcessEnv {
+  return { ...process.env, ARTEMIS_MAX_CONTEXT_TOKENS: String(options.contextTokens), ARTEMIS_CACHE_AWARE_SUMMARY: armValue(arm, options) }
+}
+
+function evalArgs(mode: 'live' | 'mock', options: Options, out: string, budgetUsd?: number): string[] {
   return [
     '--no-warnings', TSX, EVAL, `--${mode}`, '--tasks', options.tasks, '--repeat', '1', '--out', out,
     ...(mode === 'live' && options.prices ? ['--prices', options.prices] : []),
     ...(mode === 'live' && options.providers ? ['--providers', options.providers] : []),
-    ...(mode === 'live' && options.budgetUsd ? ['--budget-usd', String(options.budgetUsd / runs)] : []),
+    ...(mode === 'live' && budgetUsd !== undefined ? ['--budget-usd', budgetUsd.toFixed(4)] : []),
   ]
+}
+
+/**
+ * The models of the configured providers, as the eval would use them (model
+ * ids only; nothing else is read out): the main model and the one compaction
+ * summaries go to (auxiliaryModels.compression, else the worker, else main).
+ */
+function configuredModels(options: Options): { main?: string; summarizer?: string; source?: string } {
+  let data: any
+  let source: string | undefined
+  try {
+    if (options.providers) {
+      source = options.providers
+      data = JSON.parse(fs.readFileSync(path.resolve(options.providers), 'utf8'))
+    } else if (process.env.ARTEMIS_MODEL) {
+      return { main: process.env.ARTEMIS_MODEL, summarizer: process.env.ARTEMIS_MODEL, source: 'ARTEMIS_MODEL' }
+    } else {
+      const home = process.env.ARTEMIS_HOME?.trim() ? path.resolve(process.env.ARTEMIS_HOME) : path.join(os.homedir(), '.artemis')
+      source = path.join(home, 'providers.json')
+      if (!fs.existsSync(source)) return {}
+      data = JSON.parse(fs.readFileSync(source, 'utf8'))
+    }
+  } catch {
+    return {}
+  }
+  const profiles: Array<{ id?: string; model?: string }> = Array.isArray(data?.profiles) ? data.profiles : []
+  const main = (profiles.find((p) => p.id === data?.defaultMainProfileId) ?? profiles[0])?.model
+  const worker = profiles.find((p) => p.id === data?.specialistProfileId)?.model
+  const route = data?.auxiliaryModels?.compression
+  const compression = route?.mode === 'provider' ? profiles.find((p) => p.id === route.providerProfileId)?.model : route?.mode === 'custom' ? route.model : undefined
+  return { main, summarizer: compression ?? worker ?? main, source }
+}
+
+/** Warn when D would never continue (the summarizer is another model) unless run with --d-mode main. */
+function summarizerWarning(options: Options): string | undefined {
+  const models = configuredModels(options)
+  if (!models.main || !models.summarizer || models.summarizer === models.main || options.dMode === 'main') return undefined
+  return `⚠ compaction summaries go to ${models.summarizer}, not the main model ${models.main} (${models.source}): with ARTEMIS_CACHE_AWARE_SUMMARY=1 arm D keeps the cold path and the verdict will be inconclusive. Run D with --d-mode main to write them on the main model.`
+}
+
+/** What a finished arm run charged the dollar budget. */
+function spentIn(dir: string): number {
+  return listResultFiles(dir).reduce((sum, file) => {
+    const results = JSON.parse(fs.readFileSync(file, 'utf8')) as RunResults
+    return sum + (results.budgetSpentUsd ?? 0)
+  }, 0)
 }
 
 /** Rounds in alternating arm order (A,D then D,A, …) so drift over time hits both arms alike. */
@@ -137,19 +197,29 @@ function schedule(repeat: number): Array<{ round: number; arm: Arm }> {
 const roundDir = (options: Options, arm: Arm, round: number) => path.join(options.out, arm, `round-${String(round).padStart(2, '0')}`)
 
 function runArms(mode: 'live' | 'mock', options: Options): void {
+  if (mode === 'live' && options.budgetUsd === undefined) throw new Error('--live needs --budget-usd <cap> for the whole experiment (see the dry run for an estimate)')
   const runs = schedule(options.repeat)
   console.log(`\n  A/B ${mode}: ${runs.length} arm run(s) of ${options.tasks}, ARTEMIS_MAX_CONTEXT_TOKENS=${options.contextTokens} → ${options.out}\n`)
-  for (const { round, arm } of runs) {
+  const warning = mode === 'live' ? summarizerWarning(options) : undefined
+  if (warning) console.log(`  ${warning}\n`)
+  let remaining = options.budgetUsd
+  for (const [index, { round, arm }] of runs.entries()) {
+    if (remaining !== undefined && remaining <= 0) {
+      console.log(`  budget used up before round ${round}, arm ${arm}: the rest is not run`)
+      break
+    }
     const out = roundDir(options, arm, round)
-    console.log(`  ── round ${round}, arm ${arm} (ARTEMIS_CACHE_AWARE_SUMMARY=${ARM_ENV[arm]}) ──`)
-    const result = spawnSync(process.execPath, evalArgs(mode, options, out, runs.length), { cwd: REPO, env: armEnv(arm, options), stdio: 'inherit' })
+    const share = remaining === undefined ? undefined : remaining / (runs.length - index)
+    console.log(`  ── round ${round}, arm ${arm} (ARTEMIS_CACHE_AWARE_SUMMARY=${armValue(arm, options)}${share !== undefined ? `, budget $${share.toFixed(2)}` : ''}) ──`)
+    const result = spawnSync(process.execPath, evalArgs(mode, options, out, share), { cwd: REPO, env: armEnv(arm, options), stdio: 'inherit' })
     if (result.status !== 0 && listResultFiles(out).length === 0) throw new Error(`arm ${arm}, round ${round}: eval:zh exited with ${result.status} and wrote no results`)
+    if (remaining !== undefined) remaining -= spentIn(out)
   }
-  report(path.join(options.out, 'A'), path.join(options.out, 'D'), options.out)
+  report(path.join(options.out, 'A'), path.join(options.out, 'D'), options.margin, options.out)
 }
 
-function report(a: string, d: string, out?: string): void {
-  const comparison = compareArms(loadArm(a, 'A'), loadArm(d, 'D'))
+function report(a: string, d: string, margin: number | undefined, out?: string): void {
+  const comparison = compareArms(loadArm(a, 'A'), loadArm(d, 'D'), margin !== undefined ? { margin } : {})
   const text = renderAbComparison(comparison)
   console.log(`\n${text}`)
   if (out) {
@@ -191,7 +261,7 @@ function estimateTasks(options: Options, tasks: EvalTask[]): { estimates: TaskEs
   // One offline pass against the scripted mock model, scaled to a real model's turn count.
   const out = fs.mkdtempSync(path.join(os.tmpdir(), 'artemis-ab-estimate-'))
   try {
-    const result = spawnSync(process.execPath, evalArgs('mock', options, out, 1), { cwd: REPO, env: armEnv('A', options), encoding: 'utf8' })
+    const result = spawnSync(process.execPath, evalArgs('mock', options, out), { cwd: REPO, env: armEnv('A', options), encoding: 'utf8' })
     const file = listResultFiles(out)[0]
     if (!file) throw new Error(`the mock measurement wrote no results (exit ${result.status}):\n${(result.stdout ?? '').slice(-2_000)}${(result.stderr ?? '').slice(-2_000)}`)
     const runs = (JSON.parse(fs.readFileSync(file, 'utf8')) as RunResults).tasks
@@ -219,9 +289,11 @@ function dryRun(options: Options): void {
   const runs = schedule(options.repeat)
   console.log(`\n  A/B plan (dry run: nothing is sent to a paid model)\n`)
   console.log(`  tasks: ${tasks.map((task) => task.id).join(', ')}`)
+  const warning = summarizerWarning(options)
+  if (warning) console.log(`  ${warning}`)
   console.log(`  ${options.repeat} round(s) × 2 arms = ${runs.length} eval run(s), ${runs.length * tasks.length} task run(s); ARTEMIS_MAX_CONTEXT_TOKENS=${options.contextTokens} (a task's own setup.maxContextTokens wins)`)
   for (const { round, arm } of runs) {
-    console.log(`    round ${round} ${arm}: ARTEMIS_MAX_CONTEXT_TOKENS=${options.contextTokens} ARTEMIS_CACHE_AWARE_SUMMARY=${ARM_ENV[arm]} npm run eval:zh -- --live --tasks ${options.tasks} --out ${path.relative(REPO, roundDir(options, arm, round))}`)
+    console.log(`    round ${round} ${arm}: ARTEMIS_MAX_CONTEXT_TOKENS=${options.contextTokens} ARTEMIS_CACHE_AWARE_SUMMARY=${armValue(arm, options)} npm run eval:zh -- --live --tasks ${options.tasks} --budget-usd <share> --out ${path.relative(REPO, roundDir(options, arm, round))}`)
   }
   const { estimates, basis } = estimateTasks(options, tasks)
   const perRound = estimates.reduce((acc, e) => ({
@@ -239,19 +311,22 @@ function dryRun(options: Options): void {
   const rates = prices ? ratesFor(prices, options.model) : undefined
   if (prices && rates) {
     const typical = priceUsage(prices, options.model, { uncached: total.uncached, cacheRead: total.cacheRead, cacheWrite: total.cacheWrite, output: total.output })!
+    // Worst case: every task at its budget, every input token at the dearest rate the engine can incur
+    // (a 5-minute cache write costs more than plain input; the engine never asks for 1-hour writes).
     const ceilingInput = total.ceiling / (1 + ASSUMED_SPLIT.outputPerInput)
-    const worst = priceUsage(prices, options.model, { uncached: ceilingInput, cacheRead: 0, cacheWrite: 0, output: total.ceiling - ceilingInput })!
-    console.log(`  cost at the rates for ${options.model ?? 'the default'} (${prices.source}): ~$${typical.toFixed(2)} typical; at most ~$${worst.toFixed(2)} (every task at its budget, no cache hits)`)
+    const dearestInput = Math.max(rates.input, rates.cacheWrite ?? rates.input)
+    const worst = (ceilingInput * dearestInput + (total.ceiling - ceilingInput) * rates.output) / 1_000_000
+    console.log(`  cost at the rates for ${options.model ?? 'the default'} (${prices.source}): ~$${typical.toFixed(2)} typical; at most ~$${worst.toFixed(2)} (every task at its budget, every input token at the cache-write rate)`)
   } else {
     console.log('  cost: give rates (--prices <file> [--model <id>], or evals/prices.local.json) to see dollars;')
     console.log('        $ ≈ (uncached × input + cache read × read rate + cache write × write rate + output × output rate) / 1M')
   }
-  console.log(`\n  To spend it: npm run eval:zh:ab -- --live${options.tasks !== DEFAULT_TASKS ? ` --tasks ${options.tasks}` : ''}${options.repeat !== 3 ? ` --repeat ${options.repeat}` : ''} --budget-usd <cap>\n`)
+  console.log(`\n  To spend it: npm run eval:zh:ab -- --live${options.tasks !== DEFAULT_TASKS ? ` --tasks ${options.tasks}` : ''}${options.repeat !== 3 ? ` --repeat ${options.repeat}` : ''}${options.dMode === 'main' ? ' --d-mode main' : ''} --budget-usd <cap>\n`)
 }
 
 function main(): void {
   const options = parseOptions(process.argv.slice(2))
-  if (options.mode === 'compare') return report(options.compare![0], options.compare![1])
+  if (options.mode === 'compare') return report(options.compare![0], options.compare![1], options.margin)
   if (options.mode === 'dry-run') return dryRun(options)
   runArms(options.mode, options)
 }

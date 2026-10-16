@@ -23,10 +23,10 @@ can be compared **before and after** on the same tasks.
 npm run eval:zh:mock
 
 # Live, with the provider you configured for Artemis (costs money — see "Cost")
-npm run eval:zh -- --live --tasks category:writing,qa-savings-math
+npm run eval:zh -- --live --budget-usd 5 --tasks category:writing,qa-savings-math
 
 # The whole set, three times each, compared with an earlier run
-npm run eval:zh -- --live --repeat 3 --compare evals/results/2026-10-01T09-00-00-000Z.json
+npm run eval:zh -- --live --budget-usd 40 --repeat 3 --compare evals/results/2026-10-01T09-00-00-000Z.json
 
 # Task list
 npm run eval:zh -- --list
@@ -86,7 +86,7 @@ feature switch); in mock mode credentials are stripped from it.
 | `--repeat N` | run each task N times; pass rates become fractions. Live models are noisy: use 3+ before trusting a small difference |
 | `--jobs N` | tasks in parallel (mock 4, live 1 by default) |
 | `--budget-tokens N` | stop the run once N tokens are used (live default 6,000,000); the running task is killed, the rest are `skipped` |
-| `--budget-usd X` | same in dollars; needs rates |
+| `--budget-usd X` | **required with `--live`**: stop the run once $X is charged. Every call counts (judge and helpers too); a call whose model has no rates is charged at the highest rates in the table |
 | `--prices <file>` | per-model rates (see "Cost"); default `$EVAL_ZH_PRICES`, else `evals/prices.local.json` when it exists |
 | `--price-in X --price-out Y` | flat USD per 1M input/output tokens (or `EVAL_ZH_PRICE_IN` / `EVAL_ZH_PRICE_OUT`): every input token at the input rate, an upper bound when the provider caches; a rate file's models take precedence |
 | `--compare old.json` | per-category and per-task deltas (pass rate, score, tokens, cost, time) |
@@ -112,15 +112,20 @@ Rates are never committed. Put them in `evals/prices.local.json`
 format is in `evals/prices.example.json` (placeholder numbers only). USD per
 1M tokens; `cacheRead` and `cacheWrite` default to `input`, `cacheWrite1h`
 to `cacheWrite`; a key ending in `*` matches a model id prefix, and
-`default` covers the rest. A model without rates is reported unpriced.
+`default` covers the rest. A call whose model has no rates makes its task's
+and the run's cost **unpriced** (never a partial sum or $0); the summary
+says how many calls had no rates. DeepSeek's
+`prompt_cache_hit_tokens` count as cache reads.
 
 Per run the summary also reports the **cache-hit ratio** (cache reads ÷ all
 input), cache-write tokens, **compactions** (tier 1: old tool results
 cleared; tier 2: summarized, by path when the engine logs it), the
-**summarizer's requests and input tokens** (cold summarizer and
-cache-aware continuation alike), **API errors by type** (`400
-invalid_request_error`, `429`, `stream overloaded_error`, `network`, …) and
-the cost per completed (passed) task.
+**summarizer's requests, input tokens and cost** (cold summarizer and
+cache-aware continuation alike; a request counts as a summary by its
+newest message only), **API errors by type** (`400
+invalid_request_error`, `429`, `stream overloaded_error`, `network`, …;
+rate limits are counted apart from other 4xx) and the cost per completed
+(passed) task.
 
 Rough size of one full pass (31 tasks): the scripted mock run, with the
 minimum number of turns, uses about 1.6M tokens; a real model typically
@@ -138,7 +143,11 @@ with `ARTEMIS_MAX_CONTEXT_TOKENS=60000`, so they compact:
 - **A** — current behaviour (`ARTEMIS_CACHE_AWARE_SUMMARY=0`): tier-2
   summaries go to a separate, cold summarizer request;
 - **D** — `ARTEMIS_CACHE_AWARE_SUMMARY=1`: the summary continues the main
-  conversation's cached prefix.
+  conversation's cached prefix. When compaction summaries go to another
+  model (a worker or an `auxiliaryModels.compression` route), `=1` keeps
+  them cold; run D with `--d-mode main` (`ARTEMIS_CACHE_AWARE_SUMMARY=main`)
+  to write them on the main model. The dry run and `--live` warn when that
+  is the case.
 
 ```bash
 # The plan and a cost estimate; nothing is sent to a paid model (the estimate runs the mock once, offline)
@@ -155,15 +164,26 @@ npm run eval:zh:ab -- --mock --repeat 2
 ```
 
 The table pairs the runs of each task and round and shows, per arm: tasks
-completed, accuracy (mean grader score), $ total and **$ per completed
-task**, the input split, the cache-hit ratio, compactions by path,
-summarizer input, and 4xx errors; then **d** (mean paired score difference
-D − A) with its standard error **SE**. Ship rule, printed as the verdict:
+completed, accuracy (mean grader score), $ total, **$ per completed task**
+and $ for summaries alone, the input split, the cache-hit ratio,
+compactions by path, summarizer input, 4xx errors and rate limits; then
+**d** (mean paired score difference D − A) with its standard error **SE**,
+and the paired cost difference per run with its own SE. The verdict:
 
-- accuracy not worse (|d| ≤ SE) **and** D at least 10% cheaper per
-  completed task, **or** accuracy better (d > SE) at no more than 5% extra
-  cost per completed task;
-- **and** no new 4xx errors in D (per error type, D's count may not exceed A's).
+- **inconclusive** — fewer than 2 pairs; D wrote fewer than 3 summaries by
+  continuation (the feature barely ran); calls without rates; or D ≥ 10%
+  cheaper per completed task but the paired cost difference within its SE;
+- **do not ship** — a new 4xx error in D (per error type, D's count above
+  A's; 429 rate limits are reported but do not block), accuracy worse than
+  the non-inferiority margin (d − SE < −margin, `--margin`, default 0.05),
+  or not cheap enough for the accuracy it brings;
+- **ship** — accuracy non-inferior (d − SE ≥ −margin) **and** D at least 10%
+  cheaper per completed task beyond the paired cost noise, **or** accuracy
+  better (d > SE) at no more than 5% extra cost per completed task.
+
+`--live` needs `--budget-usd` for the whole experiment; each arm run gets
+what is left divided by the runs left, and the experiment stops when it is
+used up.
 
 `long-context-recall` compacts on the first request of its run, before the
 session has sent anything: D takes the cold path there by design (no
@@ -174,8 +194,9 @@ environment cap.
 Size of one full run (5 tasks × 3 rounds × 2 arms = 30 task runs), from the
 dry run: about **11.5M tokens** (the mock's tokens × 2.5; assumed 30%
 uncached / 60% cache read / 10% cache write, output 2% of input), at most
-**13.8M** (every task at its token budget). Run the dry run with your
-rates to see dollars before approving `--live`.
+**13.8M** (every task at its token budget; the dry run prices that
+ceiling with every input token at the cache-write rate). Run the dry run
+with your rates to see dollars before approving `--live`.
 
 ## Results
 

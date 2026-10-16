@@ -8,7 +8,7 @@ import type { CategorySummary, CompactionCounts, RunResults, RunSummary, TaskRes
 
 const OPTIONAL_COUNTS = [
   'uncachedInputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'cacheWrite5mTokens', 'cacheWrite1hTokens',
-  'summarizerRequests', 'summarizerInputTokens', 'costUsd',
+  'summarizerRequests', 'summarizerInputTokens', 'costUsd', 'unpricedRequests', 'summarizerCostUsd',
 ] as const
 
 export function addUsage(into: Usage, more: Usage): Usage {
@@ -53,9 +53,23 @@ export function addCompactions(into: CompactionCounts, more: CompactionCounts | 
   return into
 }
 
-/** Failed model requests with a 4xx status (the ship rule allows no new ones). */
+/** A rate limit (429, or a rate-limit error inside a stream): load, not a malformed request. */
+export const isRateLimitError = (kind: string): boolean => /^429\b|rate_limit/.test(kind)
+
+/** Failed model requests with a 4xx status other than rate limits (the ship rule allows no new ones). */
 export function count4xx(usage: Usage): number {
-  return Object.entries(usage.apiErrors ?? {}).filter(([kind]) => /^4\d\d\b/.test(kind)).reduce((sum, [, count]) => sum + count, 0)
+  return Object.entries(usage.apiErrors ?? {}).filter(([kind]) => /^4\d\d\b/.test(kind) && !isRateLimitError(kind)).reduce((sum, [, count]) => sum + count, 0)
+}
+
+/** Rate-limited requests (counted apart from the 4xx regressions). */
+export function countRateLimited(usage: Usage): number {
+  return Object.entries(usage.apiErrors ?? {}).filter(([kind]) => isRateLimitError(kind)).reduce((sum, [, count]) => sum + count, 0)
+}
+
+/** "$1.2345", or "unpriced" when a call had no rates, or "-" without rates at all. */
+export function costLabel(costUsd: number | undefined, usage: Usage): string {
+  if (usage.unpricedRequests) return `unpriced (${usage.unpricedRequests} call(s) without rates)`
+  return costUsd === undefined ? '-' : `$${costUsd.toFixed(4)}`
 }
 
 const fmtErrors = (usage: Usage) => {
@@ -84,7 +98,7 @@ export function summarize(tasks: TaskResult[], wallMs: number): RunSummary {
     entry.passRate = entry.tasks ? entry.passed / entry.tasks : 0
     entry.meanScore = entry.tasks ? entry.meanScore / entry.tasks : 0
   }
-  const usage = tasks.reduce((acc, task) => addUsage(acc, task.usage), { requests: 0, inputTokens: 0, outputTokens: 0 })
+  const usage = tasks.reduce((acc, task) => addUsage(acc, task.usage), { requests: 0, inputTokens: 0, outputTokens: 0 } as Usage)
   const compactions = tasks.reduce((acc, task) => addCompactions(acc, task.compactions), { tier1: 0, tier2: 0, mechanical: 0 } as CompactionCounts)
   const costs = tasks.map((task) => task.costUsd).filter((cost): cost is number => typeof cost === 'number')
   const passed = ran.filter((task) => task.status === 'pass').length
@@ -95,7 +109,8 @@ export function summarize(tasks: TaskResult[], wallMs: number): RunSummary {
     meanScore: ran.length ? ran.reduce((acc, task) => acc + task.score, 0) / ran.length : 0,
     byCategory,
     usage,
-    ...(costs.length ? { costUsd: costs.reduce((a, b) => a + b, 0) } : {}),
+    // A total with an unpriced call in it would read as cheaper than it was.
+    ...(costs.length && !usage.unpricedRequests ? { costUsd: costs.reduce((a, b) => a + b, 0) } : {}),
     compactions,
     wallMs,
   }
@@ -118,7 +133,7 @@ export function renderTrafficLines(summary: RunSummary): string[] {
   return [
     `- Input: uncached ${num(usage.uncachedInputTokens)} · cache read ${num(usage.cacheReadTokens)} · cache write ${num(usage.cacheWriteTokens)}${writes} · cache-hit ratio ${hit(usage)}`,
     `- Compactions: tier 1 ${summary.compactions?.tier1 ?? 0}, tier 2 ${summary.compactions?.tier2 ?? 0}${summary.compactions?.paths ? ` (${Object.entries(summary.compactions.paths).map(([kind, count]) => `${kind} ${count}`).join(', ')})` : ''}${summary.compactions?.mechanical ? `, mechanical ${summary.compactions.mechanical}` : ''} · summarizer: ${num(usage.summarizerRequests)} request(s), ${num(usage.summarizerInputTokens)} input tokens`,
-    `- API errors: ${fmtErrors(usage)}${summary.costUsd !== undefined ? ` · $ per completed task ${completed ? money(summary.costUsd / completed) : '-'}` : ''}`,
+    `- API errors: ${fmtErrors(usage)} (4xx other than rate limits: ${count4xx(usage)}, rate limited: ${countRateLimited(usage)})${summary.costUsd !== undefined ? ` · $ per completed task ${completed ? money(summary.costUsd / completed) : '-'} · summarizer $${(usage.summarizerCostUsd ?? 0).toFixed(4)}` : ''}`,
   ]
 }
 
@@ -130,7 +145,7 @@ export function renderMarkdown(results: RunResults): string {
     `- Mode: **${results.mode}**${results.provider?.model ? ` · model \`${results.provider.model}\`` : ''}${results.provider?.worker ? ` · worker \`${results.provider.worker}\`` : ''}`,
     `- Commit: \`${results.git?.commit?.slice(0, 10) ?? '?'}\`${results.git?.branch ? ` (${results.git.branch}${results.git.dirty ? ', dirty' : ''})` : ''}`,
     `- Passed **${summary.passed}/${summary.tasks}** (${pct(summary.passRate)}), mean grader score ${pct(summary.meanScore)}`,
-    `- Tokens ${tokens(summary.usage).toLocaleString('en-US')} (in ${summary.usage.inputTokens.toLocaleString('en-US')}, out ${summary.usage.outputTokens.toLocaleString('en-US')}, ${summary.usage.requests} model calls) · cost ${money(summary.costUsd)} · wall time ${secs(summary.wallMs)}`,
+    `- Tokens ${tokens(summary.usage).toLocaleString('en-US')} (in ${summary.usage.inputTokens.toLocaleString('en-US')}, out ${summary.usage.outputTokens.toLocaleString('en-US')}, ${summary.usage.requests} model calls) · cost ${costLabel(summary.costUsd, summary.usage)} · wall time ${secs(summary.wallMs)}`,
     ...renderTrafficLines(summary),
     '',
     '| Category | Passed | Pass rate | Mean score |',
@@ -145,7 +160,7 @@ export function renderMarkdown(results: RunResults): string {
       const passed = graded.filter((grader) => grader.status === 'pass').length
       const failed = task.graders.filter((grader) => grader.status === 'fail').map((grader) => `${grader.id}: ${grader.detail}`.replace(/\|/g, '\\|').slice(0, 140))
       const extra = task.error ? [`error: ${task.error}`.replace(/\|/g, '\\|').slice(0, 140)] : []
-      return `| ${task.id}${task.repeat ? ` (#${task.repeat})` : ''} | ${task.category} | ${task.status} | ${passed}/${graded.length} | ${tokens(task.usage).toLocaleString('en-US')} | ${hit(task.usage)} | ${fmtCompactions(task.compactions)} | ${money(task.costUsd)} | ${secs(task.durationMs)} | ${[...failed, ...extra].join('<br>') || '-'} |`
+      return `| ${task.id}${task.repeat ? ` (#${task.repeat})` : ''} | ${task.category} | ${task.status} | ${passed}/${graded.length} | ${tokens(task.usage).toLocaleString('en-US')} | ${hit(task.usage)} | ${fmtCompactions(task.compactions)} | ${costLabel(task.costUsd, task.usage)} | ${secs(task.durationMs)} | ${[...failed, ...extra].join('<br>') || '-'} |`
     }),
     '',
   ]

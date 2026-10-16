@@ -10,6 +10,11 @@
  * system prompt, tool definitions and stored history - and adds a single
  * instruction after the cache mark, so the history is read from the cache.
  *
+ * A continuation repeats a request of the same run only: the runtime
+ * forgets the record when the run ends, records expire with the cache
+ * lifetime, and the main provider resolved now must be the one that sent
+ * it. Hosted runs (runAgent) only; think() keeps the cold path.
+ *
  * Only the summary text comes from here. The context manager keeps every
  * other guarantee (pinned request, restoration, size caps, tag escaping, the
  * mechanical fallback) and falls back to the cold summarizer whenever a
@@ -157,6 +162,18 @@ export function fingerprintMessage(message: SessionMessage): string {
 const MAX_REMEMBERED_SESSIONS = 64
 const lastMainRequests = new Map<string, MainRequestRecord>()
 
+/**
+ * Drop records whose cache has likely expired: a record holds the request's
+ * tools and cache-marked images (megabytes), and a long-lived process must
+ * not keep them for sessions that went quiet.
+ */
+function pruneExpired(now: number, env?: Record<string, string | undefined>): void {
+  const ttl = cacheTtlMs(env)
+  for (const [sessionId, record] of lastMainRequests) {
+    if (now - record.sentAt > ttl) lastMainRequests.delete(sessionId)
+  }
+}
+
 /** Remember the request a session just sent (callers do this only while the option is on). */
 export function rememberMainRequest(sessionId: string, input: {
   provider: ChatProvider
@@ -166,6 +183,8 @@ export function rememberMainRequest(sessionId: string, input: {
   requestOptions: ProviderRequestOptions
   sentAt?: number
 }): void {
+  const sentAt = input.sentAt ?? Date.now()
+  pruneExpired(sentAt)
   lastMainRequests.delete(sessionId)
   lastMainRequests.set(sessionId, {
     provider: input.provider,
@@ -173,7 +192,7 @@ export function rememberMainRequest(sessionId: string, input: {
     system: input.system,
     history: input.history.map(fingerprintMessage),
     requestOptions: input.requestOptions,
-    sentAt: input.sentAt ?? Date.now(),
+    sentAt,
   })
   while (lastMainRequests.size > MAX_REMEMBERED_SESSIONS) {
     const oldest = lastMainRequests.keys().next().value
@@ -182,12 +201,19 @@ export function rememberMainRequest(sessionId: string, input: {
   }
 }
 
-export function recallMainRequest(sessionId: string): MainRequestRecord | undefined {
+export function recallMainRequest(sessionId: string, now = Date.now()): MainRequestRecord | undefined {
+  pruneExpired(now)
   return lastMainRequests.get(sessionId)
 }
 
+/** Forget a session's last request (the runtime does this when a run ends). */
 export function forgetMainRequest(sessionId: string): void {
   lastMainRequests.delete(sessionId)
+}
+
+/** Sessions with a remembered request (tests and diagnostics). */
+export function rememberedMainRequestCount(): number {
+  return lastMainRequests.size
 }
 
 // ── the manager-facing contract ─────────────────────────────────────────────
@@ -197,8 +223,6 @@ export type ContinuationSummaryRequest = {
   history: readonly SessionMessage[]
   /** The final user-role instruction (buildContinuationInstruction). */
   instruction: string
-  /** Upper bound on the reply's output tokens. */
-  maxOutputTokens: number
 }
 
 export type ContinuationSummaryReply =
@@ -231,11 +255,7 @@ export async function summarizeByContinuation(input: {
   })
   let reply: ContinuationSummaryReply
   try {
-    reply = await input.continueSummary({
-      history: input.history,
-      instruction,
-      maxOutputTokens: Math.max(8_000, input.maxSummaryTokens * 3),
-    })
+    reply = await input.continueSummary({ history: input.history, instruction })
   } catch (error) {
     if (isAbortError(error)) throw error
     return { status: 'failed', reason: error instanceof Error ? error.message.split('\n')[0]!.slice(0, 200) : String(error) }
@@ -254,11 +274,42 @@ export async function summarizeByContinuation(input: {
 
 // ── the runtime side ────────────────────────────────────────────────────────
 
+/** The provider that actually serves a request: a routed provider's first candidate, else itself. */
+function servingProvider(provider: ChatProvider): ChatProvider {
+  return provider.primaryProvider ?? provider
+}
+
+/**
+ * Why a response stopped early, when the adapter's raw payload says so: the
+ * Messages API (`stop_reason`), chat completions (`finish_reason`), the
+ * Responses API (`incomplete_details`) and Gemini (`finishReason`).
+ */
+export function truncationReason(raw: unknown): string | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const record = raw as Record<string, any>
+  const reasons = [
+    record.stop_reason,
+    record.choices?.[0]?.finish_reason,
+    record.status === 'incomplete' ? record.incomplete_details?.reason ?? 'incomplete' : undefined,
+    record.candidates?.[0]?.finishReason,
+  ]
+  return reasons.find((reason): reason is string =>
+    typeof reason === 'string' && /^(?:max_tokens|length|max_output_tokens|MAX_TOKENS|model_context_window_exceeded|incomplete)$/.test(reason))
+}
+
 export type ContinueConversationInput = {
   /** The session's last main request (recallMainRequest). */
   record: MainRequestRecord | undefined
-  /** The configured summarizer: a continuation runs only on the main model. */
-  summarizer: { provider: ChatProvider; model?: string }
+  /** The main provider as resolved now: the cached prefix belongs to it. */
+  main: ChatProvider
+  /** The configured summarizer. */
+  summarizer: ChatProvider
+  /**
+   * True when summaries go to the main model even though another summarizer
+   * is configured (cacheAwareSummary "main"). Otherwise a different
+   * summarizer means the cold path: a cache lives with one model and endpoint.
+   */
+  onMainModel?: boolean
   request: ContinuationSummaryRequest
   abortSignal?: AbortSignal
   /**
@@ -272,19 +323,26 @@ export type ContinueConversationInput = {
 
 /**
  * Send the summary instruction as a continuation of the session's last main
- * request: same provider, system message, tools (and cache-marked images),
- * the stored history, then the instruction as a trailing message, so the
- * adapters keep the cache mark on the newest stored message. No tool choice
- * is forced; an answer that calls a tool counts as a failure.
+ * request: the same provider object (so the same model, effort, thinking and
+ * output settings as that request), system message, tools (and cache-marked
+ * images), the stored history, then the instruction as a trailing message,
+ * so the adapters keep the cache mark on the newest stored message. No
+ * request option is changed: no forced tool choice and no smaller
+ * max_tokens that could fall under a thinking budget. An answer that calls a
+ * tool, or that stopped at the output limit, counts as a failure.
  */
 export async function continueConversationForSummary(input: ContinueConversationInput): Promise<ContinuationSummaryReply> {
   const record = input.record
-  if (!record) return { status: 'skipped', reason: 'no earlier request of this session to continue' }
+  if (!record) return { status: 'skipped', reason: 'no earlier request of this run to continue' }
   const now = input.now ?? Date.now()
   if (now - record.sentAt > cacheTtlMs(input.env)) return { status: 'skipped', reason: 'the cached prefix has likely expired' }
-  const sameModel = input.summarizer.provider === record.provider ||
-    (record.model !== undefined && input.summarizer.model !== undefined && record.model === input.summarizer.model)
-  if (!sameModel) return { status: 'skipped', reason: 'the summarizer model is not the main model' }
+  const main = servingProvider(input.main)
+  if (servingProvider(record.provider) !== main || (record.model ?? '') !== (input.main.model ?? '')) {
+    return { status: 'skipped', reason: 'the main provider changed since the last request' }
+  }
+  if (!input.onMainModel && servingProvider(input.summarizer) !== main) {
+    return { status: 'skipped', reason: 'the summarizer is not the main model' }
+  }
   const { history } = input.request
   if (history.length < record.history.length || record.history.some((digest, i) => fingerprintMessage(history[i]!) !== digest)) {
     return { status: 'skipped', reason: 'the history changed since the last request' }
@@ -299,10 +357,11 @@ export async function continueConversationForSummary(input: ContinueConversation
   const messages = [record.system, ...history, instruction]
   const response = await record.provider.complete(messages, {
     ...record.requestOptions,
-    maxOutputTokens: input.request.maxOutputTokens,
     ...(input.abortSignal ? { abortSignal: input.abortSignal } : {}),
   })
   if (response.nativeToolCalls?.length) throw new Error('the model called a tool instead of writing the summary')
+  const truncated = truncationReason(response.raw)
+  if (truncated) throw new Error(`the summary was cut off (${truncated})`)
   const raw = response.text ?? ''
   const text = input.readReply ? input.readReply(raw) : raw
   if (text === undefined) throw new Error('the model answered with an action instead of the summary')

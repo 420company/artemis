@@ -49,6 +49,7 @@ const has = (text: string, key: string): boolean => new RegExp(`"${key}"\\s*:\\s
  * OpenAI chat/responses, Anthropic messages and Gemini formats. Streams
  * repeat or accumulate usage, so the largest value per field wins.
  *
+ *   DeepSeek              prompt_tokens = prompt_cache_hit_tokens + prompt_cache_miss_tokens
  *   OpenAI chat, Gemini   prompt_tokens / promptTokenCount include cached
  *                         tokens (prompt_tokens_details.cached_tokens,
  *                         cachedContentTokenCount; gateways may add
@@ -72,7 +73,7 @@ export function extractUsage(body: string): ResponseUsage | undefined {
   let uncached: number
   if (has(body, 'prompt_tokens') || has(body, 'promptTokenCount')) {
     input = maxOf(body, ['prompt_tokens', 'promptTokenCount'])
-    cacheRead = Math.min(input, maxOf(body, ['cached_tokens', 'cachedContentTokenCount', 'cache_read_input_tokens']))
+    cacheRead = Math.min(input, maxOf(body, ['cached_tokens', 'cachedContentTokenCount', 'cache_read_input_tokens', 'prompt_cache_hit_tokens']))
     cacheWrite = Math.min(input - cacheRead, maxOf(body, ['cache_write_tokens', 'cache_creation_input_tokens']))
     uncached = input - cacheRead - cacheWrite
   } else if (has(body, 'cache_read_input_tokens') || has(body, 'cache_creation_input_tokens') || !has(body, 'cached_tokens')) {
@@ -90,9 +91,38 @@ export function extractUsage(body: string): ResponseUsage | undefined {
   return { input, output, uncached, cacheRead, cacheWrite, ...ttl }
 }
 
-/** Main turn (tools attached), compaction summary (cold or continuation), or another helper call. */
+function partText(content: unknown): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map((part) => {
+    const p = part as { text?: unknown; content?: unknown }
+    return typeof p?.text === 'string' ? p.text : typeof p?.content === 'string' ? p.content : ''
+  }).join('\n')
+}
+
+/** Text of the newest message of a request (chat/messages `messages`, responses `input`, Gemini `contents`). */
+export function lastMessageText(text: string): string {
+  try {
+    const parsed = JSON.parse(text) as { messages?: unknown[]; input?: unknown; contents?: unknown[] }
+    const list = Array.isArray(parsed.messages) ? parsed.messages : Array.isArray(parsed.input) ? parsed.input : Array.isArray(parsed.contents) ? parsed.contents : []
+    const last = list.at(-1) as { content?: unknown; parts?: unknown } | undefined
+    if (!last) return typeof parsed.input === 'string' ? parsed.input : ''
+    return partText(last.content ?? last.parts)
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Main turn (tools attached), compaction summary, or another helper call.
+ * Only the newest message decides a summary (the continuation's tagged
+ * instruction, or the cold summarizer's request), so a history that merely
+ * quotes either is still a main turn.
+ */
 export function classifyRequest(text: string): RequestKind {
-  if (isContinuationSummaryText(text) || /compact a long conversation|压缩一段用户与 AI 代理/.test(text)) return 'summarizer'
+  const last = lastMessageText(text)
+  if (isContinuationSummaryText(last)) return 'summarizer'
+  if (last.includes('<new_messages>') && /Output only the summary|只输出摘要本身/.test(last)) return 'summarizer'
   return hasTools(text) ? 'main' : 'helper'
 }
 

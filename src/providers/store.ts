@@ -324,7 +324,7 @@ export type ExplicitCompressionSettings = {
   threshold?: number;
   /** As written: a number, or a string such as "off" (see parseContextCap). */
   maxContextTokens?: number | string;
-  cacheAwareSummary?: boolean;
+  cacheAwareSummary?: boolean | 'main';
 };
 
 export function pickExplicitCompression(raw: unknown): ExplicitCompressionSettings {
@@ -338,7 +338,7 @@ export function pickExplicitCompression(raw: unknown): ExplicitCompressionSettin
   if (typeof record.maxContextTokens === 'number' || (typeof record.maxContextTokens === 'string' && record.maxContextTokens.trim())) {
     picked.maxContextTokens = record.maxContextTokens;
   }
-  if (typeof record.cacheAwareSummary === 'boolean') picked.cacheAwareSummary = record.cacheAwareSummary;
+  if (typeof record.cacheAwareSummary === 'boolean' || record.cacheAwareSummary === 'main') picked.cacheAwareSummary = record.cacheAwareSummary;
   return picked;
 }
 

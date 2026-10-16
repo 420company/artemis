@@ -94,6 +94,7 @@ import {
   buildContextOverflowMessage,
   continueConversationForSummary,
   detectConversationLanguage,
+  forgetMainRequest,
   isContextOverflowError,
   isSyntheticUserMessage,
   manageContext,
@@ -4203,8 +4204,12 @@ export type RunAgentOptions = {
     thresholdRatio?: number;
     /** Optional cap below the model window, for cost control. */
     maxContextTokens?: number;
-    /** Tier-2 summaries continue the main conversation's cached prefix (core/compaction/continuation.ts). */
-    cacheAwareSummary?: boolean;
+    /**
+     * Tier-2 summaries continue the main conversation's cached prefix
+     * (core/compaction/continuation.ts); "main" also when another
+     * summarizer model is configured.
+     */
+    cacheAwareSummary?: boolean | 'main';
   };
   /** Called with a short user-facing line whenever the history is compacted. */
   onContextCompaction?: (notice: string) => void;
@@ -6827,6 +6832,9 @@ export async function runAgent(
   try {
     return await runAgentInner(session, userInput, options);
   } finally {
+    // A cache-aware summary continues a request of this run only; its record
+    // (tools, cache-marked images) is not kept past the run.
+    if (options.compaction?.cacheAwareSummary) forgetMainRequest(session.id);
     leaveIdentityRun();
     await leaveBrowserTurn();
   }
@@ -7153,13 +7161,14 @@ async function runAgentInner(
   // Cache-aware summaries (opt-in): the summary request continues the
   // session's last main request, so its history is read from the provider's
   // prompt cache. Without one, or on another model, the cold path runs.
-  const cacheAwareSummary = options.compaction?.cacheAwareSummary === true;
+  const cacheAwareSummary = options.compaction?.cacheAwareSummary === true || options.compaction?.cacheAwareSummary === 'main';
   const continueSummary: ContinuationSummarizeFn | undefined = cacheAwareSummary
     ? (request) => {
-      const summarizer = summarizerProvider();
       return continueConversationForSummary({
         record: recallMainRequest(session.id),
-        summarizer: { provider: summarizer, model: summarizer.model },
+        main: options.resolveProvider?.(profile) ?? options.provider,
+        summarizer: summarizerProvider(),
+        onMainModel: options.compaction?.cacheAwareSummary === 'main',
         request,
         abortSignal: options.abortSignal,
         // A main-model answer may come as the reply envelope; actions are not a summary.

@@ -291,9 +291,11 @@ export type AgentSetupConfig = {
      * Tier-2 summaries continue the main conversation (same model, system
      * prompt, tools and history, then a summary instruction) so they read the
      * provider's prompt cache instead of re-sending the history cold. Off by
-     * default; ARTEMIS_CACHE_AWARE_SUMMARY overrides it.
+     * default; ARTEMIS_CACHE_AWARE_SUMMARY overrides it. `true` keeps the
+     * cold path when the summarizer is another model (a worker); "main"
+     * writes these summaries with the main model even then.
      */
-    cacheAwareSummary?: boolean;
+    cacheAwareSummary?: boolean | 'main';
   };
   sessionReset: {
     mode: 'both' | 'idle' | 'daily' | 'never';
@@ -613,6 +615,11 @@ export interface ChatProvider {
   readonly promptCacheMarks?: boolean;
   /** Model id this provider sends requests to, when known. */
   readonly model?: string;
+  /**
+   * Routed providers only: the candidate tried first (the provider that
+   * serves the request unless it fails). Undefined on a plain provider.
+   */
+  readonly primaryProvider?: ChatProvider;
   /** Context window (tokens) of the model behind this provider, when known. */
   readonly contextWindow?: number;
   /** Output tokens this provider reserves per completion (max_tokens), when known. */
