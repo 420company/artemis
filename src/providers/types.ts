@@ -161,6 +161,17 @@ export type ProviderRequestOptions = {
    */
   imageAttachments?: ImageAttachment[];
   /**
+   * Messages provider: the stored message the images belong to (default: the
+   * newest user message). Lets every round of a tool loop send them on the
+   * same message, so the prefix later thinking is bound to stays the same.
+   */
+  imageMessageId?: string;
+  /**
+   * Messages provider: `none` asks for a reply without tool calls while the
+   * tools stay declared.
+   */
+  toolChoice?: 'none';
+  /**
    * The same images, for a provider with prompt cache marks: each group in a
    * user message of its own right after the stored message it was first sent
    * after (`afterMessageId`; at the end of the history when that message is

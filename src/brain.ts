@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 import Anthropic from '@anthropic-ai/sdk';
 import { RUNTIME_CONTEXT_MESSAGE_NAME } from './providers/runtimeContext.js';
-import { dropStoredThinking } from './providers/thinkingReplay.js';
+import { checksThinkingReplay, dropStoredThinking } from './providers/thinkingReplay.js';
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -1746,6 +1746,10 @@ function makeSessionMessage(
     };
 }
 
+/** Ids of the per-request context and self-check notes kept in the history (see keepRequestContext). */
+const KEPT_CONTEXT_ID_PREFIX = 'runtime-context-kept-';
+const KEPT_NOTE_ID_PREFIX = 'runtime-note-kept-';
+
 /** A per-request note sent after the conversation (adapters split it off; never stored). */
 function makeRuntimeContextMessage(content: string): SessionMessage {
     return { id: 'runtime-context-request', role: 'user', name: RUNTIME_CONTEXT_MESSAGE_NAME, content, createdAt: new Date(0).toISOString() };
@@ -2751,7 +2755,9 @@ async function thinkTurn(
         nativeFunctionTools: unknown[] | undefined,
     ): Promise<number> => {
         // + room for the "current task" note when the boundary carries the request.
-        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools) + (requestMessageId ? 80 : 0) + skillIndexTokens + turnContextTokens +
+        const fixedTokens = systemTokens + estimateToolSchemaTokens(nativeFunctionTools) + (requestMessageId ? 80 : 0) +
+            // Kept in the history where replayed thinking is checked (counted there).
+            (keptThinkingRequests() ? 0 : skillIndexTokens + turnContextTokens) +
             (selfCheckTurn ? estimateTokens(selfCheckTurn.note) + 4 : 0);
         const managed = await manageContext({
             messages: history,
@@ -3014,6 +3020,30 @@ async function thinkTurn(
         }
     };
 
+    // Where the API checks replayed thinking against everything sent before
+    // it, the per-request context is kept in the history (appended where it
+    // first applies, then left in place) instead of being re-sent after the
+    // newest message each round: re-sent, it moves, and every earlier
+    // round's and turn's thinking (and the prompt cache after it) goes.
+    const keptThinkingRequests = (): boolean => checksThinkingReplay(providerConfigVal);
+    let keptNoteFor: object | undefined;
+    const keepRequestContext = (runtimeNote: string, selfCheck: { note: string } | undefined): void => {
+        const kept = [...history].reverse()
+            .find((message) => message.name === RUNTIME_CONTEXT_MESSAGE_NAME && message.id.startsWith(KEPT_CONTEXT_ID_PREFIX));
+        if (runtimeNote && kept?.content !== runtimeNote) {
+            appendHistory(makeSessionMessage('user', runtimeNote, { name: RUNTIME_CONTEXT_MESSAGE_NAME, id: `${KEPT_CONTEXT_ID_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 9)}` }));
+        }
+        if (selfCheck && keptNoteFor !== selfCheck) {
+            keptNoteFor = selfCheck;
+            appendHistory(makeSessionMessage('user', selfCheck.note, { name: RUNTIME_CONTEXT_MESSAGE_NAME, id: `${KEPT_NOTE_ID_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 9)}` }));
+        }
+    };
+    /** The request's images; where thinking is kept, on every round and always on the request's own message. */
+    const requestImages = (send: boolean): Record<string, unknown> => ({
+        imageAttachments: send && hasImageAttachments ? requestImageAttachments : undefined,
+        ...(send && hasImageAttachments && requestMessageId && keptThinkingRequests() ? { imageMessageId: requestMessageId } : {}),
+    });
+
     nativeRoundLoop:
     for (let round = 1; round <= maxProviderRounds + selfCheckExtraRounds; round += 1) {
         selfCheckTurn = selfCheckPending;
@@ -3048,8 +3078,10 @@ async function thinkTurn(
             const runtimeNote = [turnContextText, skillIndexSection, requestNote].filter(Boolean).join('\n\n');
             // Self-check instructions: per request, never stored, after the history.
             const requestContext = [runtimeNote, selfCheckTurn?.note].filter(Boolean).join('\n\n');
+            const keepsThinking = keptThinkingRequests();
+            if (keepsThinking) keepRequestContext(runtimeNote, selfCheckTurn);
             return {
-                messages: requestContext
+                messages: requestContext && !keepsThinking
                     ? [...systemMessages, ...history, makeRuntimeContextMessage(requestContext)]
                     : [...systemMessages, ...history],
                 completionOptions: {
@@ -3059,7 +3091,7 @@ async function thinkTurn(
                     // tool capability. Do not drop them just because the setup "vision"
                     // tool group was disabled; providers that cannot handle images will
                     // ignore/fail explicitly in their own adapter path.
-                    imageAttachments: round === 1 && hasImageAttachments ? requestImageAttachments : undefined,
+                    ...requestImages(round === 1 || keepsThinking),
                     ...(round === 1 && hasImageAttachments && requestVisionSkip ? { visionSkip: requestVisionSkip } : {}),
                     onReasoning,
                     guardStreamingText: supportsNativeTools && !plainChat,
@@ -3102,15 +3134,23 @@ async function thinkTurn(
                     latestUserText,
                 );
                 // Same overflow recovery as any other request: compact, retry once.
+                // Where replayed thinking is checked the tools stay declared
+                // (tool_choice none) and the images stay on their message:
+                // dropping either would change the prefix the loop's thinking
+                // is bound to.
+                const finalizerKeepsThinking = keptThinkingRequests();
                 const forcedAttempt = await requestWithOverflowRecovery(
                     () => ({
                         messages: [...systemMessages, ...history, finalizerMessage],
                         completionOptions: {
+                            ...(finalizerKeepsThinking
+                                ? { nativeFunctionTools, toolChoice: 'none', ...requestImages(true) }
+                                : {}),
                             onReasoning,
                             guardStreamingText: false,
                         },
                     }),
-                    undefined,
+                    finalizerKeepsThinking ? nativeFunctionTools : undefined,
                 );
                 if (forcedAttempt.interrupted) {
                     widenProjectedTools();

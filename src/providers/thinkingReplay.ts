@@ -22,15 +22,41 @@ import type { SessionMessage } from '../core/types.js';
  */
 
 /**
- * Model ids the API runs the prefix check for, later generations included.
- * An optional vendor prefix (`anthropic.`, `us.anthropic.`) is allowed.
- * Other models keep the request shape they always had.
+ * Model ids the API runs the prefix check for, later generations included,
+ * wherever the id sits in a longer name (`anthropic.`, `us.anthropic.`,
+ * `anthropic/`, `vertex_ai/`, an inference-profile ARN). Other models keep
+ * the request shape they always had, unless the API has already rejected
+ * replayed thinking for them (see markThinkingReplayChecked).
  */
 const PREFIX_CHECKED_MODELS =
-  /^(?:[a-z0-9-]+\.)*claude-(?:fable-(?:5[.-][1-9]|[6-9])|(?:opus|sonnet|haiku)-(?:5[.-][5-9]|[6-9]))(?![0-9])/i;
+  /(?:^|[/.:@])claude-(?:fable-(?:5[.-][1-9]|[6-9])|(?:opus|sonnet|haiku)-(?:5[.-][5-9]|[6-9]))(?![0-9])/i;
 
 export function modelChecksThinkingPrefix(model: string): boolean {
   return PREFIX_CHECKED_MODELS.test(model.trim());
+}
+
+type EndpointConfig = { protocol?: string; baseUrl?: string; model?: string };
+
+/** Endpoint + model pairs the API has rejected replayed thinking for (aliases, unknown ids). */
+const confirmedChecking = new Set<string>();
+
+function endpointKey(config: EndpointConfig): string {
+  return `${(config.baseUrl ?? '').replace(/\/+$/, '')}|${(config.model ?? '').trim().toLowerCase()}`;
+}
+
+/** After a replay 400 the endpoint + model is treated as checking for the rest of the process. */
+export function markThinkingReplayChecked(config: EndpointConfig): void {
+  confirmedChecking.add(endpointKey(config));
+}
+
+/**
+ * Whether requests to this Messages endpoint keep replayed thinking valid:
+ * the model id is a known checking one, or the API has rejected replayed
+ * thinking for it once already.
+ */
+export function checksThinkingReplay(config: EndpointConfig | null | undefined): boolean {
+  if (!config || (config.protocol !== undefined && config.protocol !== 'messages')) return false;
+  return modelChecksThinkingPrefix(config.model ?? '') || confirmedChecking.has(endpointKey(config));
 }
 
 type Block = { type?: unknown; [key: string]: unknown };
@@ -48,31 +74,38 @@ export function withoutThinkingBlocks<T>(blocks: readonly T[]): T[] {
   return blocks.filter((block) => !isThinkingBlock(block));
 }
 
-/**
- * Canonical form for the digest. Key order and `cache_control` marks are not
- * part of what the API checks, and a string content is the same value as one
- * text block, so neither changes the digest.
- */
-function canonical(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonical);
+/** Key-sorted copy (key order is not part of what the API checks). */
+function sortedKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortedKeys);
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-      if (key === 'cache_control') continue;
       const entry = (value as Record<string, unknown>)[key];
-      if (entry === undefined) continue;
-      out[key] = canonical(entry);
+      if (entry !== undefined) out[key] = sortedKeys(entry);
     }
     return out;
   }
   return value;
 }
 
+/**
+ * A system, tool or content block as the digest sees it: its own
+ * `cache_control` mark is not part of the check; everything nested in it
+ * (tool inputs, schemas, tool_result content) counts as sent.
+ */
+function canonicalBlock(block: unknown): unknown {
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return sortedKeys(block);
+  const { cache_control: _mark, ...rest } = block as Record<string, unknown>;
+  return sortedKeys(rest);
+}
+
+function canonicalContent(content: unknown): unknown {
+  return Array.isArray(content) ? content.map(canonicalBlock) : content;
+}
+
+/** A string content and a one-text-block content are kept distinct: the provider sends one form only. */
 function canonicalMessage(message: { role?: unknown; content?: unknown }): string {
-  const content = typeof message.content === 'string'
-    ? (message.content ? [{ type: 'text', text: message.content }] : [])
-    : message.content;
-  return JSON.stringify(canonical({ role: message.role, content }));
+  return JSON.stringify({ role: message.role, content: canonicalContent(message.content) });
 }
 
 function sha256(text: string): string {
@@ -86,11 +119,12 @@ function sha256(text: string): string {
 export class PrefixDigest {
   private current: string;
 
+  /** Tools in the order sent: a reordered list counts as changed (the safe direction). */
   constructor(system: unknown, tools: unknown) {
-    const toolList = Array.isArray(tools)
-      ? [...tools].sort((a, b) => String((a as Block)?.name ?? '').localeCompare(String((b as Block)?.name ?? '')))
-      : [];
-    this.current = sha256(JSON.stringify(canonical({ system: system ?? null, tools: toolList })));
+    this.current = sha256(JSON.stringify({
+      system: canonicalContent(system ?? null),
+      tools: Array.isArray(tools) ? tools.map(canonicalBlock) : [],
+    }));
   }
 
   push(message: { role?: unknown; content?: unknown }): void {
@@ -132,31 +166,39 @@ export function isThinkingReplayError(status: number, body: string): boolean {
   return /invalid\s+`?signature`?\s+in\s+`?(?:redacted_)?thinking`?\s+block|bound to a different conversation|prefix_mismatch_behavior/i.test(body);
 }
 
-/** The body with every thinking block left out of its messages; null when it has none. */
+/** Stands in for a turn that held nothing but thinking: an empty assistant turn is a 400 of its own. */
+export const EMPTY_TURN_TEXT = '(no reply text)';
+
+/** A turn's blocks without thinking; never empty. */
+export function thinkingFreeBlocks<T>(blocks: readonly T[]): Array<T | { type: 'text'; text: string }> {
+  const kept = withoutThinkingBlocks(blocks);
+  return kept.length > 0 ? kept : [{ type: 'text', text: EMPTY_TURN_TEXT }];
+}
+
+/**
+ * The body with every thinking block left out of its messages; null when it
+ * has none. Used for the one retry after a replay 400, on any model.
+ */
 export function stripThinkingFromBody(body: Record<string, unknown>): Record<string, unknown> | null {
   const messages = body.messages;
   if (!Array.isArray(messages)) return null;
   let changed = false;
-  const next: unknown[] = [];
-  for (const message of messages) {
+  const next = messages.map((message) => {
     const content = (message as { content?: unknown }).content;
-    if (!Array.isArray(content) || !content.some(isThinkingBlock)) {
-      next.push(message);
-      continue;
-    }
+    if (!Array.isArray(content) || !content.some(isThinkingBlock)) return message;
     changed = true;
-    const kept = withoutThinkingBlocks(content);
-    // A turn that held nothing but thinking goes; the API merges the turns around it.
-    if (kept.length > 0) next.push({ ...(message as Record<string, unknown>), content: kept });
-  }
+    return { ...(message as Record<string, unknown>), content: thinkingFreeBlocks(content) };
+  });
   return changed ? { ...body, messages: next } : null;
 }
 
 /**
  * Leaves the thinking blocks out of the stored assistant turns named in
- * `ids` (their text and tool calls stay). Once a block has been left out of
- * a request it has to stay out: putting it back would invalidate the
- * thinking produced while it was gone.
+ * `ids` (their text and tool calls stay), on any model: the turns a request
+ * left out (prefix changed) or that the API rejected. Once a block has been
+ * left out of a request it has to stay out: putting it back would invalidate
+ * the thinking produced while it was gone. The stored blocks map to the same
+ * bytes the request just sent for them.
  */
 export function dropStoredThinking(
   messages: readonly SessionMessage[],
@@ -168,9 +210,8 @@ export function dropStoredThinking(
   const next = messages.map((message) => {
     if (message.role !== 'assistant' || !wanted.has(message.id) || !hasThinkingBlocks(message.rawContentBlocks)) return message;
     changed = true;
-    const kept = withoutThinkingBlocks(message.rawContentBlocks!);
-    const { rawContentBlocks: _raw, thinkingBinding: _binding, ...rest } = message;
-    return kept.length > 0 ? { ...rest, rawContentBlocks: kept } : rest;
+    const { thinkingBinding: _binding, ...rest } = message;
+    return { ...rest, rawContentBlocks: thinkingFreeBlocks(message.rawContentBlocks!) };
   });
   return { messages: next, changed };
 }
