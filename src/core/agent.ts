@@ -201,6 +201,7 @@ import {
 } from '../utils/visualGenerationConfig.js';
 import { DEFAULT_MODEL_IDS } from '../providers/presets.js';
 import { isOwnerProviderStoreFile, overrideProviderConfig } from '../providers/overrides.js';
+import { ReplyStreamFilter } from './replyStream.js';
 
 /**
  * Some model families (notably ark/doubao, qwen-coder, glm) emit tool calls
@@ -6888,6 +6889,8 @@ async function runAgentInner(
   }
 
   let finalReply = '';
+  // The reply text the user sees streamed (since the last `[stream-reset]`).
+  let streamShown = '';
   const profile = options.profile ?? 'main';
   const shouldOwnHeimdallState = options.heimdallThreadState === undefined;
   const heimdallThreadState =
@@ -7985,31 +7988,68 @@ async function runAgentInner(
       ...(cachedImages?.groups.length ? { imageGroups: cachedImages.groups } : {}),
       ...(visionSkip ? { visionSkip } : {}),
     };
-    // Stream the model output live to the workflow UI when the provider
-    // supports it. We forward each delta as a `[stream-chunk]` info line,
-    // which the workflow renderer accumulates into a per-stage live buffer
-    // and shows as it arrives in the terminal UI.
+    // Stream the reply live as the model writes it, when the provider
+    // supports it: each piece goes out as a `[stream-chunk]` info line with
+    // its text_delta event (the workflow UI and hosts rebuild the text from
+    // them). The model writes the JSON response contract, so its raw output
+    // is never what is streamed: only the reply the user will be shown
+    // (core/replyStream.ts: the envelope's "reply", decoded; never actions,
+    // tasks, claims or plan; plain text up to any tool-call markup). When a
+    // later call of this run starts its own reply, `[stream-reset]` first
+    // says the text streamed so far is superseded. Best effort: the run's
+    // final reply is authoritative.
     const requestCompletion = async (messages: SessionMessage[]): Promise<ProviderResponse> => {
       if (typeof activeProvider.completeStream === 'function' && options.onInfo) {
         const onInfoCallback = options.onInfo;
         onInfoCallback(`[stream-start] profile=${profile} turn=${turn}`);
+        const filter = new ReplyStreamFilter();
+        // This call's reply so far, and whether it took over what the user sees.
+        let callText = '';
+        let callShown = false;
+        const emit = (text: string): void => {
+          if (!text) return;
+          streamShown += text;
+          // Encode newlines so the receiver can rebuild the text.
+          onInfoCallback(
+            `[stream-chunk] profile=${profile} turn=${turn} delta=${JSON.stringify(text)}`,
+            { type: 'text_delta', text, profile },
+          );
+        };
+        const takeOver = (): void => {
+          callShown = true;
+          if (streamShown) {
+            streamShown = '';
+            onInfoCallback(`[stream-reset] profile=${profile} turn=${turn}`, { type: 'text_reset', profile });
+          }
+          emit(callText);
+        };
+        const show = (text: string, last = false): void => {
+          callText += text;
+          if (callShown) return emit(text);
+          // A call that repeats what is already shown (a verification pass
+          // rewriting the same reply, a retried request) changes nothing
+          // until it says something else; one that shows nothing keeps it.
+          if (!callText) return;
+          if (streamShown.startsWith(callText) && !(last && callText !== streamShown)) return;
+          takeOver();
+        };
+        let ended = false;
         try {
-          return await completeProviderTurn(
+          const response = await completeProviderTurn(
             activeProvider,
             messages,
             {
               ...providerCallOptions,
             },
             (delta) => {
-              if (!delta) return;
-              // Encode newlines so the receiver can rebuild the text.
-              onInfoCallback(
-                `[stream-chunk] profile=${profile} turn=${turn} delta=${JSON.stringify(delta)}`,
-                { type: 'text_delta', text: delta, profile },
-              );
+              if (delta) show(filter.push(delta));
             },
           );
+          ended = true;
+          return response;
         } finally {
+          // What was held only because more might follow (a call that failed shows no more).
+          if (ended) show(filter.end(), true);
           onInfoCallback(`[stream-end] profile=${profile} turn=${turn}`);
         }
       }

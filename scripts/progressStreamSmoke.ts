@@ -16,7 +16,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { parseArgs, getHelpText } from '../src/cli/parseArgs.js'
-import { runAgent as runAgentNow } from '../src/core/agent.js'
+import { parseAssistantEnvelopeForSmoke, runAgent as runAgentNow } from '../src/core/agent.js'
+import { ReplyStreamFilter, visibleReplyOf } from '../src/core/replyStream.js'
 import { settleMemoryCuration } from '../src/core/memory.js'
 import { childInfo, nextAgentRef, toolArtifacts, toolDetail, type ProgressEvent } from '../src/core/progressEvents.js'
 import { normalizeTodos, renderTodos, validateTodoAction } from '../src/core/todoList.js'
@@ -335,6 +336,191 @@ function collector(): { lines: string[]; events: Array<Record<string, unknown>>;
   assert('bgm: a long new request with a file is not a wizard answer', !looksLikeSagaWizardAnswer('帮我把这份季度报告整理成一页摘要，然后发给团队里的每个人看看\n\nAttached file: uploads/a/report.mp3'))
   const hint = buildRoutedWorkflowHint('saga', { cwd: root, userPrompt: 'x' })
   assert('bgm: the long-video playbook takes an attached audio file as soundtrackPath', /soundtrackPath/.test(hint) && /attach an audio file/.test(hint))
+}
+
+// ── Streamed text is the reply, never the JSON envelope ───────────────────
+{
+  const IMAGE_ENVELOPE = '{"reply":"已生成：25岁亚洲女性全身写真，米白色连衣裙、自然光公园场景。\\n\\nmedia/images/asian-woman-full-body.png","done":true,"actions":[],"tasks":[],"claims":[],"plan":[]}'
+  const stream = (raw: string, chunks: string[]): string => {
+    const f = new ReplyStreamFilter()
+    let out = ''
+    for (const chunk of chunks) out += f.push(chunk)
+    return out + f.end()
+  }
+  const bySize = (raw: string, size: number): string[] => {
+    const chunks: string[] = []
+    for (let i = 0; i < raw.length; i += size) chunks.push(raw.slice(i, i + size))
+    return chunks
+  }
+  /** The UTF-8 bytes cut every `size` bytes, decoded as a provider's SSE reader does. */
+  const byBytes = (raw: string, size: number): string[] => {
+    const bytes = new TextEncoder().encode(raw)
+    const decoder = new TextDecoder()
+    const chunks: string[] = []
+    for (let i = 0; i < bytes.length; i += size) chunks.push(decoder.decode(bytes.subarray(i, i + size), { stream: true }))
+    chunks.push(decoder.decode())
+    return chunks
+  }
+  let seed = 7
+  const random = (): number => {
+    seed = (seed * 1103515245 + 12345) % 2147483648
+    return seed / 2147483648
+  }
+  const randomCuts = (raw: string): string[] => {
+    const chunks: string[] = []
+    for (let i = 0; i < raw.length;) {
+      const n = 1 + Math.floor(random() * 9)
+      chunks.push(raw.slice(i, i + n))
+      i += n
+    }
+    return chunks
+  }
+  /** Every way to stream it gives the reply the run ends with (agent.ts tryParseEnvelope). */
+  const everyCut = (label: string, raw: string, want = parseAssistantEnvelopeForSmoke(raw).reply): void => {
+    const wrong: string[] = []
+    for (let size = 1; size <= Math.min(raw.length, 40); size += 1) {
+      const got = stream(raw, bySize(raw, size))
+      if (got !== want) wrong.push(`chars/${size}: ${JSON.stringify(got)}`)
+      const gotBytes = stream(raw, byBytes(raw, size))
+      if (gotBytes !== want) wrong.push(`bytes/${size}: ${JSON.stringify(gotBytes)}`)
+    }
+    for (let round = 0; round < 30; round += 1) {
+      const got = stream(raw, randomCuts(raw))
+      if (got !== want) wrong.push(`random: ${JSON.stringify(got)}`)
+    }
+    assert(`reply stream: ${label} (every split gives ${JSON.stringify(want.slice(0, 40))})`, wrong.length === 0, wrong.slice(0, 3).join(' | '))
+  }
+
+  everyCut('the image job\'s final envelope', IMAGE_ENVELOPE)
+  assert('reply stream: the image envelope shows the reply only', visibleReplyOf(IMAGE_ENVELOPE) === '已生成：25岁亚洲女性全身写真，米白色连衣裙、自然光公园场景。\n\nmedia/images/asian-woman-full-body.png')
+  {
+    // No delta ever shows a piece of the envelope, at any split.
+    const leaks: string[] = []
+    for (let size = 1; size <= IMAGE_ENVELOPE.length; size += 1) {
+      const f = new ReplyStreamFilter()
+      for (const chunk of bySize(IMAGE_ENVELOPE, size)) {
+        const out = f.push(chunk)
+        if (/[{}[\]"\\]|reply|done|actions|tasks|claims|plan/.test(out)) leaks.push(`${size}: ${JSON.stringify(out)}`)
+      }
+    }
+    assert('reply stream: no delta carries envelope syntax or field names', leaks.length === 0, leaks.slice(0, 3).join(' | '))
+  }
+  everyCut('escapes split across chunks (\\n \\" \\\\ \\/ \\t \\uXXXX, a surrogate pair)', '{"reply":"第一行\\n第二行 \\"引号\\" 反斜杠\\\\ 斜杠\\/ 制表\\t 中\\u6587 表情\\ud83d\\ude00 末尾","done":true,"actions":[]}')
+  everyCut('a raw emoji and CJK in the reply', '{"reply":"好的 😀👍🏽 完成","done":true}')
+  everyCut('the envelope in a ```json fence', '```json\n{"reply":"围栏里的回复\\n第二行","done":true,"actions":[]}\n```')
+  everyCut('whitespace before the envelope', '\n\n  {"reply": "前面有空白", "done": true}')
+  everyCut('reply after the other fields', '{"done":false,"tasks":[{"id":"1","content":"reply 里的 \\"x\\"","status":"pending"}],"actions":[{"type":"write_file","path":"a.md","content":"{\\"reply\\":\\"not me\\"}","reply":"nested"}],"reply":"真正的回复","plan":[{"id":"1","content":"步骤"}]}')
+  everyCut('a tool-call turn: progress note plus actions', '{"reply":"好的，开始生成图片。","done":false,"actions":[{"type":"generate_image","prompt":"25岁亚洲女性全身写真，米白色连衣裙","size":"1024x1536"}],"tasks":[{"id":"1","content":"生成图片","status":"in_progress"}],"claims":[],"plan":[]}')
+  everyCut('an envelope with an empty reply', '{"reply":"","done":false,"actions":[{"type":"read_file","path":"a.md"}]}')
+  everyCut('an envelope without a reply field shows nothing while streaming', '{"done":false,"actions":[{"type":"read_file","path":"a.md"}]}', '')
+  everyCut('a plain-text answer is streamed as it is', '这是一个普通的回答，没有 JSON。\n\n- 第一点\n- 第二点 `code {x}` a<b\n\n```ts\nconst a = { b: 1 }\n```')
+  everyCut('a plain-text answer is trimmed like the parsed reply', '\n  前后有空白的回答  \n\n')
+  everyCut('a plain answer with a code fence first', '```python\nprint("hi")\n```\n说明文字')
+  everyCut('prose then tool-call markup: the prose only', '我先读一下文件。\n<toolcall name="read_file">{"path":"notes.md"}</toolcall>')
+  everyCut('tool-call markup only: nothing', '<toolcall name="read_file">{"path":"notes.md"}</toolcall>')
+  everyCut('an <invoke> call: nothing', '<invoke name="read_file"><parameter name="path">a.md</parameter></invoke>')
+  assert('reply stream: prose then an embedded envelope never shows the envelope', !/[{}"]/.test(visibleReplyOf('好的。\n```json\n{"reply":"x","done":true,"actions":[]}\n```')) && !/[{}"]/.test(visibleReplyOf('好的。 {"actions":[{"type":"read_file","path":"a"}]}')))
+  assert('reply stream: tool-call markup inside an envelope reply is cut', visibleReplyOf('{"reply":"看一下 <call name=\\"read_file\\">{}</call>","done":false}') === '看一下 ')
+  // Review: every envelope key, only real tool-call markup, release what turns out to be text.
+  for (const key of ['done', 'plan', 'tasks', 'claims']) {
+    const value = key === 'done' ? 'true' : '[]'
+    const raw = `Sure.\n{"${key}":${value},"reply":"Final"}`
+    const leaks: string[] = []
+    for (let size = 1; size <= raw.length; size += 1) {
+      const got = stream(raw, bySize(raw, size))
+      if (got !== 'Sure.') leaks.push(`${size}: ${JSON.stringify(got)}`)
+    }
+    assert(`reply stream: an envelope after prose starting with "${key}" never shows`, leaks.length === 0, leaks.slice(0, 2).join(' | '))
+  }
+  everyCut('a tag that is no tool call streams (<action android:name=… />)', 'Add <action android:name="android.intent.action.MAIN" /> to the manifest.')
+  everyCut('"<call it done" streams', 'Let\'s <call it done> for today, and <call it a day.')
+  everyCut('<function ...> without a tool name streams', 'In JS, <function onload="x"> is not a thing.')
+  everyCut('a tool call in the middle is left out, the prose around it streams', '我先读一下。\n<invoke name="read_file"><parameter name="path">a.md</parameter></invoke>\n然后继续。')
+  everyCut('wrapped calls only: nothing', '<function_calls>\n<invoke name="read_file"><parameter name="path">a</parameter></invoke>\n</function_calls>')
+  everyCut('a JSON example with "reply" mid-text streams once more prose follows', 'The format:\n```json\n{"reply":"x","actions":[]}\n```\nThat is all.')
+  everyCut('an object with "actions" mid-text streams once more prose follows', 'Send {"actions": [1, 2]} to the API, then wait.')
+  everyCut('a reply starting with { that is no envelope streams', '{a, b} is a set.')
+  everyCut('a JSON answer (no envelope keys) streams', '{"name":"Alice","age":3}')
+  everyCut('a ```json block that is no envelope streams', '```json\n{"name":1,"tags":["a"]}\n```\n这是示例。')
+  assert('reply stream: an unterminated stream shows what it has', stream('', ['{"reply":"写到一半']) === '写到一半')
+  assert('reply stream: a high surrogate is held until its pair', (() => {
+    const f = new ReplyStreamFilter()
+    const a = f.push('{"reply":"x\\ud83d')
+    const b = f.push('\\ude00y"}')
+    return a === 'x' && b === '😀y'
+  })())
+}
+
+// ── A real run streams the reply, one reply per model call ────────────────
+{
+  const cwd = path.join(root, 'stream-run')
+  fs.mkdirSync(cwd, { recursive: true })
+  const FINAL = '{"reply":"已生成：25岁亚洲女性全身写真，米白色连衣裙、自然光公园场景。\\n\\nmedia/images/asian-woman-full-body.png","done":true,"actions":[],"tasks":[{"id":"1","content":"生成图片","status":"completed"}],"claims":[],"plan":[]}'
+  const scripts: Record<string, string[]> = {
+    envelope: [
+      '{"reply":"好的，马上生成。","done":false,"actions":[{"type":"write_file","path":"media/images/asian-woman-full-body.png","content":"png"}],"tasks":[{"id":"1","content":"生成图片","status":"in_progress"}],"claims":[],"plan":[]}',
+      FINAL,
+    ],
+    xml: ['<toolcall name="write_file">{"path":"x.md","content":"hi"}</toolcall>', '{"reply":"写好了 x.md。","done":true,"actions":[]}'],
+    plain: ['这是普通文本回答。\n\n第二段。'],
+  }
+  const run = async (name: string) => {
+    let call = 0
+    const script = scripts[name]!
+    const provider = {
+      async complete(): Promise<ProviderResponse> {
+        throw new Error('streamed only')
+      },
+      async completeStream(_messages: unknown, onChunk: (delta: string) => void): Promise<ProviderResponse> {
+        const text = script[Math.min(call, script.length - 1)]!
+        call += 1
+        // Cut at 3 characters, the way provider deltas arrive mid-token.
+        for (let i = 0; i < text.length; i += 3) onChunk(text.slice(i, i + 3))
+        return { text, raw: null, streamed: true, usage: { promptTokens: 100, completionTokens: 10, totalTokens: 110 } }
+      },
+    } as unknown as ChatProvider
+    const store = new SessionStore(cwd)
+    const session = store.createSession({ title: `stream ${name}` })
+    await store.save(session)
+    const c = collector()
+    const result = await runAgent(session, '生成一张图', {
+      cwd, provider, sessionStore: store, permissionManager: new PermissionManager('accept-all', false), maxTurns: 4, profile: 'main', onInfo: c.onInfo,
+    })
+    // What a host shows: text deltas, cleared at each reset.
+    let shown = ''
+    const seenTexts: string[] = []
+    for (const e of c.events) {
+      if (e.type === 'text_reset') shown = ''
+      if (e.type === 'text_delta') {
+        shown += String(e.text)
+        seenTexts.push(shown)
+      }
+    }
+    // The stderr lines a host without the stream reads, rebuilt the same way.
+    let fromLines = ''
+    for (const line of c.lines) {
+      if (line.startsWith('[stream-reset] profile=main')) fromLines = ''
+      const m = /^\[stream-chunk\] profile=main turn=\d+ delta=(".*")$/.exec(line)
+      if (m) fromLines += JSON.parse(m[1]!) as string
+    }
+    return { result, events: c.events, shown, seenTexts, fromLines }
+  }
+
+  const envelope = await run('envelope')
+  assert('run: the image run finished with the parsed reply', envelope.result.reply.startsWith('已生成：'), envelope.result.reply)
+  assert('run: the tool-call turn still ran its action', fs.existsSync(path.join(cwd, 'media/images/asian-woman-full-body.png')))
+  assert('run: no streamed text ever showed the envelope or its fields', envelope.seenTexts.every((t) => !/[{}"]|"reply"|actions|tasks|claims|plan|done/.test(t)), JSON.stringify(envelope.seenTexts.find((t) => /[{}"]/.test(t))))
+  assert('run: the progress note streamed, then a reset before the final reply', envelope.events.some((e) => e.type === 'text_delta' && String(e.text).includes('好的')) && envelope.events.filter((e) => e.type === 'text_reset').length === 1)
+  assert('run: the text streamed since the last reset is the final reply (no jump)', envelope.shown === envelope.result.reply, JSON.stringify(envelope.shown))
+  const resultEvent = envelope.events.find((e) => e.type === 'result')
+  assert('run: stderr stream lines rebuild the same text', envelope.fromLines === envelope.result.reply && resultEvent === undefined, JSON.stringify(envelope.fromLines))
+
+  const xml = await run('xml')
+  assert('run: a tool-call-markup turn shows nothing and still runs its call', fs.existsSync(path.join(cwd, 'x.md')) && xml.events.filter((e) => e.type === 'text_reset').length === 0, JSON.stringify(xml.events.filter((e) => e.type === 'text_delta')))
+  assert('run: after a markup-only turn, the streamed text is the reply', xml.shown === xml.result.reply && xml.result.reply === '写好了 x.md。', JSON.stringify(xml.shown))
+
+  const plain = await run('plain')
+  assert('run: a plain-text answer streams unchanged and equals the reply', plain.shown === plain.result.reply && plain.result.reply === '这是普通文本回答。\n\n第二段。', JSON.stringify(plain.shown))
 }
 
 fs.rmSync(root, { recursive: true, force: true })
