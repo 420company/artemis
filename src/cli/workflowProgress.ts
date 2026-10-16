@@ -732,9 +732,10 @@ export function applyWorkflowProgressInfo(
     return;
   }
 
-  // Streaming events: forward the model's raw output to a per-stage live
-  // buffer so the user can see the agent write in real time.
-  if (normalized.startsWith('[stream-start]')) {
+  // Streaming events: the reply as the model writes it (only the reply,
+  // never the raw JSON envelope; core/replyStream.ts) goes to a per-stage
+  // live buffer so the user can see the agent write in real time.
+  if (normalized.startsWith('[stream-start]') || normalized.startsWith('[stream-reset]')) {
     const active = getActiveStage(state);
     if (active) active.liveStream = '';
     return;
@@ -1208,7 +1209,7 @@ export function shouldSurfaceWorkflowInfo(message: string): boolean {
   if (/^\[tool:[a-z_]+\]\s+(ok|failed|blocked|denied|running|progress|authorize_error|error|heimdall_artifact_error)/i.test(stripped)) return false;
   // Same for usage / reply / stream meta-events the workflow renderer consumes.
   if (/^\[usage\]/i.test(stripped)) return false;
-  if (/^\[stream-(start|chunk|end)\]/i.test(stripped)) return false;
+  if (/^\[stream-(start|chunk|reset|end)\]/i.test(stripped)) return false;
   if (/^\[reply\]/i.test(stripped)) return false;
   if (/^\[log:(info|warn|error)\]/i.test(stripped)) return false;
   return /\b(error|failed|denied)\b/i.test(stripped) || /\bblocked\b/i.test(stripped);

@@ -16,7 +16,15 @@
  *   {"v":1,"seq":11,"type":"segment","job":"long_video","index":2,"total":6,"status":"done"}
  *   {"v":1,"seq":12,"type":"approval_request","request":{…the [approval-request] object…}}
  *   {"v":1,"seq":13,"type":"text_delta","text":"Hel"}
- *   {"v":1,"seq":14,"type":"result","sessionId":"…","turns":3,"durationMs":5120,"reply":"…"}
+ *   {"v":1,"seq":14,"type":"text_reset"}
+ *   {"v":1,"seq":15,"type":"result","sessionId":"…","turns":3,"durationMs":5120,"reply":"…"}
+ *
+ * `text_delta` is the answer as the user will read it, never the model's
+ * raw output: of a JSON envelope (`{"reply":…,"actions":…}`) only the reply
+ * string, decoded (core/replyStream.ts). `text_reset` says the text streamed
+ * so far is superseded: a later model call of the run (after tools ran)
+ * started its own reply, and the deltas that follow replace it. The text
+ * streamed since the last reset is the result's reply.
  *
  * The events come from the agent's info lines (core/progressEvents.ts): each
  * one is written in the same onInfo call that writes its stderr line, and
@@ -157,6 +165,9 @@ export class StreamJsonWriter {
         // Another profile's text (a review pass without a sub-agent wrapper)
         // is not shown either.
         if (!agent && (event.profile ?? 'main') === 'main') this.emit('text_delta', { text: event.text });
+        return;
+      case 'text_reset':
+        if (!agent && (event.profile ?? 'main') === 'main') this.emit('text_reset');
         return;
       case 'tool_start':
         this.emit('tool_start', {

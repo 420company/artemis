@@ -35,6 +35,12 @@ export type ToolEndStatus = 'ok' | 'failed' | 'denied' | 'blocked' | 'error';
 export type ProgressEvent =
   /** Model text as it streams; `profile` is the agent profile that wrote it (only `main` is the answer). */
   | { type: 'text_delta'; text: string; profile?: string; agents?: AgentRef[] }
+  /**
+   * The text streamed so far is superseded: a later model call of the run
+   * started its own reply (the earlier one was a progress note before tools
+   * ran). Hosts clear the streamed text and show the new one in its place.
+   */
+  | { type: 'text_reset'; profile?: string; agents?: AgentRef[] }
   | { type: 'tool_start'; callId: string; tool: string; detail?: string; agents?: AgentRef[] }
   | {
       type: 'tool_end';
