@@ -421,6 +421,27 @@ function collector(): { lines: string[]; events: Array<Record<string, unknown>>;
   everyCut('an <invoke> call: nothing', '<invoke name="read_file"><parameter name="path">a.md</parameter></invoke>')
   assert('reply stream: prose then an embedded envelope never shows the envelope', !/[{}"]/.test(visibleReplyOf('好的。\n```json\n{"reply":"x","done":true,"actions":[]}\n```')) && !/[{}"]/.test(visibleReplyOf('好的。 {"actions":[{"type":"read_file","path":"a"}]}')))
   assert('reply stream: tool-call markup inside an envelope reply is cut', visibleReplyOf('{"reply":"看一下 <call name=\\"read_file\\">{}</call>","done":false}') === '看一下 ')
+  // Review: every envelope key, only real tool-call markup, release what turns out to be text.
+  for (const key of ['done', 'plan', 'tasks', 'claims']) {
+    const value = key === 'done' ? 'true' : '[]'
+    const raw = `Sure.\n{"${key}":${value},"reply":"Final"}`
+    const leaks: string[] = []
+    for (let size = 1; size <= raw.length; size += 1) {
+      const got = stream(raw, bySize(raw, size))
+      if (got !== 'Sure.') leaks.push(`${size}: ${JSON.stringify(got)}`)
+    }
+    assert(`reply stream: an envelope after prose starting with "${key}" never shows`, leaks.length === 0, leaks.slice(0, 2).join(' | '))
+  }
+  everyCut('a tag that is no tool call streams (<action android:name=… />)', 'Add <action android:name="android.intent.action.MAIN" /> to the manifest.')
+  everyCut('"<call it done" streams', 'Let\'s <call it done> for today, and <call it a day.')
+  everyCut('<function ...> without a tool name streams', 'In JS, <function onload="x"> is not a thing.')
+  everyCut('a tool call in the middle is left out, the prose around it streams', '我先读一下。\n<invoke name="read_file"><parameter name="path">a.md</parameter></invoke>\n然后继续。')
+  everyCut('wrapped calls only: nothing', '<function_calls>\n<invoke name="read_file"><parameter name="path">a</parameter></invoke>\n</function_calls>')
+  everyCut('a JSON example with "reply" mid-text streams once more prose follows', 'The format:\n```json\n{"reply":"x","actions":[]}\n```\nThat is all.')
+  everyCut('an object with "actions" mid-text streams once more prose follows', 'Send {"actions": [1, 2]} to the API, then wait.')
+  everyCut('a reply starting with { that is no envelope streams', '{a, b} is a set.')
+  everyCut('a JSON answer (no envelope keys) streams', '{"name":"Alice","age":3}')
+  everyCut('a ```json block that is no envelope streams', '```json\n{"name":1,"tags":["a"]}\n```\n这是示例。')
   assert('reply stream: an unterminated stream shows what it has', stream('', ['{"reply":"写到一半']) === '写到一半')
   assert('reply stream: a high surrogate is held until its pair', (() => {
     const f = new ReplyStreamFilter()

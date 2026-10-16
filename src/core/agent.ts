@@ -7954,7 +7954,8 @@ async function runAgentInner(
     // (core/replyStream.ts: the envelope's "reply", decoded; never actions,
     // tasks, claims or plan; plain text up to any tool-call markup). When a
     // later call of this run starts its own reply, `[stream-reset]` first
-    // says the text streamed so far is superseded.
+    // says the text streamed so far is superseded. Best effort: the run's
+    // final reply is authoritative.
     const requestCompletion = async (messages: SessionMessage[]): Promise<ProviderResponse> => {
       if (typeof activeProvider.completeStream === 'function' && options.onInfo) {
         const onInfoCallback = options.onInfo;

@@ -778,7 +778,8 @@ async function runQueryCommand(options: {
   const stream = options.outputFormat === 'stream-json'
     ? new (await import('../services/streamJson.js')).StreamJsonWriter({ locale: locale === 'zh-CN' ? 'zh-CN' : 'en' })
     : undefined
-  if (stream) stream.start({ mode, engine: (await import('../appMeta.js')).APP_VERSION })
+  // `text: reply`: text_delta is the reply only, never the model's raw output (hosts need not filter it).
+  if (stream) stream.start({ mode, engine: (await import('../appMeta.js')).APP_VERSION, text: 'reply' })
   const finalPrompt = mode === 'analyze'
     ? `${t('只分析不修改：调研以下问题并给出结论，不要改动任何文件或执行有副作用的命令。', 'Analysis only: investigate the question and report conclusions without modifying files or running side-effectful commands.')}\n\n${prompt}`
     : prompt

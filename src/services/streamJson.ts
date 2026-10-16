@@ -4,7 +4,7 @@
  * Stdout becomes a stream of JSON objects, one per line (NDJSON), each with
  * the format version `v` and a sequence number `seq`:
  *
- *   {"v":1,"seq":1,"type":"start","engine":"0.2.83"}
+ *   {"v":1,"seq":1,"type":"start","engine":"0.2.83","text":"reply"}
  *   {"v":1,"seq":2,"type":"todo","items":[{"id":"t1","content":"读配置","status":"in_progress"}]}
  *   {"v":1,"seq":3,"type":"tool_start","callId":"call_4","tool":"read_file","label":"读取文件","detail":"src/app.ts"}
  *   {"v":1,"seq":4,"type":"tool_end","callId":"call_4","tool":"read_file","status":"ok"}
@@ -21,10 +21,14 @@
  *
  * `text_delta` is the answer as the user will read it, never the model's
  * raw output: of a JSON envelope (`{"reply":…,"actions":…}`) only the reply
- * string, decoded (core/replyStream.ts). `text_reset` says the text streamed
- * so far is superseded: a later model call of the run (after tools ran)
- * started its own reply, and the deltas that follow replace it. The text
- * streamed since the last reset is the result's reply.
+ * string, decoded (core/replyStream.ts); `start` says so with
+ * `"text":"reply"` (an engine without it streamed the raw output). A
+ * `text_reset` says the text streamed so far is superseded: a later model
+ * call of the run (after tools ran) started its own reply, and the deltas
+ * that follow replace it. Best effort: the text since the last reset is
+ * usually the result's reply, but not always (prose before an envelope, a
+ * self-check's closing reply, native-tool rounds that are not streamed, a
+ * repeated "reply" key); the result's reply is authoritative.
  *
  * The events come from the agent's info lines (core/progressEvents.ts): each
  * one is written in the same onInfo call that writes its stderr line, and
