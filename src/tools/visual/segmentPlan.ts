@@ -177,6 +177,10 @@ export function splitLongShots<T extends SplittableShot>(
       out.push(shot);
       continue;
     }
+    // Whole-second parts of a fractional span: the last part takes the
+    // remainder, so the parts add up to the span exactly (40.6 s → 21 + 19.6).
+    const remainder = span - durations.reduce((sum, value) => sum + value, 0);
+    if (Math.abs(remainder) > 1e-9) durations[durations.length - 1] = Math.round((durations[durations.length - 1]! + remainder) * 1000) / 1000;
     out.push(...splitShotInto(shot, durations));
   }
   return out;
@@ -265,6 +269,21 @@ export function parseClipBeat(beat: string): ClipShotPart[] | undefined {
   });
 }
 
+/**
+ * A clip beat after a rewrite (the story check): kept when it still reads as
+ * the same number of shots; given back its opening line when the rewrite
+ * kept every shot marker but dropped or changed that line; else the beat
+ * before the rewrite, since a rewrite without the markers would lose shots.
+ */
+export function restoreClipBeat(before: string, rewritten: string): string {
+  const shots = parseClipBeat(before)?.length;
+  if (!shots) return rewritten;
+  if (parseClipBeat(rewritten)?.length === shots && CLIP_HEADER_RE.exec(rewritten)?.[0].includes(` ${shots} camera shots`)) return rewritten;
+  const body = rewritten.replace(/One clip of \d+ camera shots[^.]*\.\s*/g, '').trim();
+  const restored = `${clipShotsHeader(shots)} ${body}`;
+  return parseClipBeat(restored)?.length === shots ? restored : before;
+}
+
 /** How many camera shots a beat holds (1 unless it is a clip of several). */
 export function clipBeatShotCount(beat: string): number {
   return parseClipBeat(beat)?.length ?? 1;
@@ -284,7 +303,8 @@ export function openingShotCamera(camera: string): string {
 /**
  * A clip beat within maxChars without losing a shot: the look lines go first
  * (last shot first), then each shot keeps its marker and every dialogue
- * sentence and shares the room left for its other sentences, in order. A
+ * sentence and shares the room left for its other sentences, in order (the
+ * first one that does not fit is cut to what is left). A
  * beat of one shot, or one whose markers and dialogue alone are longer, is
  * returned as short as this makes it; the caller clips what is left.
  */
@@ -321,18 +341,16 @@ export function fitClipBeat(beat: string, maxChars: number): string {
   }
   return renderClipBeat(shots.map((shot, shotIndex) => {
     let left = shares[shotIndex]!;
-    let action = false;
     const body = shot.sentences.map((sentence, index) => {
       if (shot.spoken[index]) return sentence;
       if (sentence.length + 1 <= left) {
         left -= sentence.length + 1;
-        action = true;
         return sentence;
       }
-      if (!action && left >= 40) {
+      if (left >= 40) {
+        // The rest of the room goes to the first sentence that does not fit.
         const cut = clipChars(sentence, left - 1);
         left = 0;
-        action = true;
         return cut;
       }
       return '';

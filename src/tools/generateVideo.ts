@@ -42,6 +42,7 @@ import {
 } from './visual/providers/timeouts.js';
 import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
 import { DEFAULT_MODEL_IDS } from '../providers/presets.js';
+import { minuteReporter, pollSleep, videoPollPlan } from './visual/pollSleep.js';
 
 const DEFAULT_MODEL = DEFAULT_MODEL_IDS.byteplusVideo;
 const DEFAULT_RATIO = '16:9';
@@ -162,12 +163,6 @@ async function localImagePathsToDataUrls(paths: string[] | undefined, context: T
   return dataUrls;
 }
 
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) {
-    throw new DOMException('The operation was aborted.', 'AbortError');
-  }
-}
-
 function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortSignal | undefined {
   const active = signals.filter((signal): signal is AbortSignal => Boolean(signal));
   if (active.length === 0) return undefined;
@@ -175,21 +170,26 @@ function combineAbortSignals(...signals: Array<AbortSignal | undefined>): AbortS
   return AbortSignal.any(active);
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  throwIfAborted(signal);
-  return new Promise((resolve, reject) => {
-    const cleanup = () => signal?.removeEventListener('abort', onAbort);
-    const timer = setTimeout(() => {
-      cleanup();
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      cleanup();
-      reject(new DOMException('The operation was aborted.', 'AbortError'));
-    };
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
+/** A video task's status in the progress line: waiting in line, being made, or another step. */
+function videoTaskStatusLabel(status: string): string {
+  if (/^(?:queued|pending|submitted)$/.test(status)) return '排队中';
+  if (/^(?:running|processing|in_progress)$/.test(status)) return '生成中';
+  return '处理中';
+}
+
+/**
+ * About once a minute while a task is polled, a progress line: the Saga
+ * segment when there is one, the task's status and the minutes waited.
+ */
+function pollProgressLogger(task: VideoTaskOptions): (status: string, waitedMs: number) => void {
+  let status = '';
+  const report = minuteReporter((minutes) => {
+    toolLog(`⏳ ${task.progressLabel ?? ''}视频${videoTaskStatusLabel(status)}，已等待 ${minutes} 分钟…`);
+  }, task.pollWaitedMs ?? 0);
+  return (next, waitedMs) => {
+    status = next;
+    report(waitedMs);
+  };
 }
 
 function resolveConfiguredVideoModel(action: GenerateVideoAction, configuredModel: string): string {
@@ -199,12 +199,26 @@ function resolveConfiguredVideoModel(action: GenerateVideoAction, configuredMode
   return requestedModel;
 }
 
+/**
+ * What only Saga passes, never a tool call: poll a task already submitted
+ * (still queued or running when its last wait ran out) instead of submitting
+ * a new one, with the time already waited on it, and the segment named in
+ * the progress lines logged while it is polled. Not an action field, so no
+ * agent or tool argument can point the generator at another task.
+ */
+export type VideoTaskOptions = {
+  resumeTaskId?: string;
+  pollWaitedMs?: number;
+  progressLabel?: string;
+};
+
 export async function executeGenerateVideo(
   action: GenerateVideoAction,
   context: ToolExecutionContext,
+  task: VideoTaskOptions = {},
 ): Promise<ToolExecutionResult> {
   try {
-    const configuredResult = await tryGenerateWithConfiguredVisualProvider(action, context);
+    const configuredResult = await tryGenerateWithConfiguredVisualProvider(action, context, task);
     if (configuredResult) {
       return configuredResult;
     }
@@ -238,14 +252,8 @@ export async function executeGenerateVideo(
     }
     const ratio = normalizeVideoRatioArgument(action.ratio, DEFAULT_RATIO, toolWarn) ?? DEFAULT_RATIO;
     const duration = normalizeVideoDurationForProvider(action.duration, 'byteplus', model);
-    const maxPolls =
-      typeof action.maxPolls === 'number' && action.maxPolls > 0
-        ? Math.floor(action.maxPolls)
-        : DEFAULT_MAX_POLLS;
-    const pollIntervalMs =
-      typeof action.pollIntervalMs === 'number' && action.pollIntervalMs >= 1000
-        ? Math.floor(action.pollIntervalMs)
-        : DEFAULT_POLL_INTERVAL_MS;
+    // Within 1–30 s between polls and 5–40 minutes in all (pollSleep.ts).
+    const { maxPolls, pollIntervalMs } = videoPollPlan(action, { maxPolls: DEFAULT_MAX_POLLS, pollIntervalMs: DEFAULT_POLL_INTERVAL_MS });
     const directed = action.cleanDirect === true
       ? { directedPrompt: fitVerbatimPrompt(action.prompt, 'byteplus', model), providerProfile: 'Saga cleanDirect: Director bypassed, prompt passed verbatim' }
       : buildDirectedVideoPrompt({
@@ -305,51 +313,59 @@ export async function executeGenerateVideo(
       watermark: Boolean(action.watermark),
     };
 
-    const createRes = await fetch(createEndpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(createBody),
-      signal: combineAbortSignals(context.abortSignal, AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS)),
-    });
-
-    const createRaw = await createRes.text();
-    if (!createRes.ok) {
-      return {
-        action,
-        ok: false,
-        ...legacyVideoFailure(`Video generation: task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`, createRes.status, context),
-      };
-    }
-
-    let createPayload: TaskCreateResponse;
-    try {
-      createPayload = JSON.parse(createRaw) as TaskCreateResponse;
-    } catch {
-      return {
-        action,
-        ok: false,
-        output: `Video generation: could not parse create response: ${createRaw.slice(0, 500)}`,
-      };
-    }
-
-    const taskId = extractTaskId(createPayload);
+    // A task already submitted (still queued or running when its last wait
+    // ran out) is polled again instead of being submitted twice.
+    let taskId = task.resumeTaskId?.trim() || undefined;
     if (!taskId) {
-      return {
-        action,
-        ok: false,
-        output: `Video generation: no task id in response. ${createPayload.error?.message ?? ''}`.trim(),
-      };
+      const createRes = await fetch(createEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(createBody),
+        signal: combineAbortSignals(context.abortSignal, AbortSignal.timeout(VIDEO_CREATE_TIMEOUT_MS)),
+      });
+
+      const createRaw = await createRes.text();
+      if (!createRes.ok) {
+        return {
+          action,
+          ok: false,
+          ...legacyVideoFailure(`Video generation: task create failed (HTTP ${createRes.status}): ${createRaw.slice(0, 500)}`, createRes.status, context),
+        };
+      }
+
+      let createPayload: TaskCreateResponse;
+      try {
+        createPayload = JSON.parse(createRaw) as TaskCreateResponse;
+      } catch {
+        return {
+          action,
+          ok: false,
+          output: `Video generation: could not parse create response: ${createRaw.slice(0, 500)}`,
+        };
+      }
+
+      taskId = extractTaskId(createPayload);
+      if (!taskId) {
+        return {
+          action,
+          ok: false,
+          output: `Video generation: no task id in response. ${createPayload.error?.message ?? ''}`.trim(),
+        };
+      }
     }
 
     const statusEndpoint = modelArkEndpoint(baseUrl, `contents/generations/tasks/${encodeURIComponent(taskId)}`);
     let videoUrl: string | undefined;
     let lastStatus = 'pending';
 
+    const onPoll = pollProgressLogger(task);
+    let waitedMs = task.pollWaitedMs ?? 0;
     for (let attempt = 0; attempt < maxPolls; attempt++) {
-      await sleep(pollIntervalMs, context.abortSignal);
+      await pollSleep(pollIntervalMs, context.abortSignal);
+      waitedMs += pollIntervalMs;
       const pollRes = await fetch(statusEndpoint, {
         headers: { Authorization: `Bearer ${apiKey}` },
         signal: combineAbortSignals(context.abortSignal, AbortSignal.timeout(VIDEO_POLL_TIMEOUT_MS)),
@@ -369,6 +385,7 @@ export async function executeGenerateVideo(
         continue;
       }
       lastStatus = (pollPayload.status ?? '').toLowerCase();
+      onPoll(lastStatus, waitedMs);
       if (lastStatus === 'failed' || lastStatus === 'cancelled' || lastStatus === 'canceled') {
         return {
           action,
@@ -481,6 +498,7 @@ function legacyVideoFailure(
 async function tryGenerateWithConfiguredVisualProvider(
   action: GenerateVideoAction,
   context: ToolExecutionContext,
+  task: VideoTaskOptions,
 ): Promise<ToolExecutionResult | null> {
   const configured = await resolveConfiguredVisualProvider(context.cwd, 'video');
   if (!configured) {
@@ -514,7 +532,7 @@ async function tryGenerateWithConfiguredVisualProvider(
   const model = shouldPromoteBytePlusVideoModel(action, configured.config)
     ? BYTEPLUS_SEEDANCE_2_PRO_MODEL
     : resolveConfiguredVideoModel(action, configured.config.video.model || configured.model);
-  return generateVideoWithVisualProvider(action, context, configured.config, provider, model, 'configured visual API');
+  return generateVideoWithVisualProvider(action, context, configured.config, provider, model, 'configured visual API', task);
 }
 
 async function tryGenerateWithMainSecondaryFallbackProviders(
@@ -558,6 +576,7 @@ async function generateVideoWithVisualProvider(
   provider: any,
   model: string,
   _sourceLabel: string,
+  task: VideoTaskOptions = {},
 ): Promise<ToolExecutionResult> {
   const videoConfig = config.video;
   // No provider or model name in user-facing status; the project plan and
@@ -674,6 +693,8 @@ async function generateVideoWithVisualProvider(
     watermark: action.watermark ?? videoConfig.defaultParams.watermark,
     maxPolls: action.maxPolls,
     pollIntervalMs: action.pollIntervalMs,
+    ...(task.resumeTaskId ? { resumeTaskId: task.resumeTaskId, pollWaitedMs: task.pollWaitedMs } : {}),
+    onPoll: pollProgressLogger(task),
     abortSignal: context.abortSignal,
   } as any);
 

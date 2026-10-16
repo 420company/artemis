@@ -5,6 +5,7 @@ import {
 import {
   getProviderCallableActionTypes,
   getToolDefinition,
+  stripUnknownActionArguments,
   validateToolAction,
 } from '../tools/registry.js';
 import type { ToolError } from '../tools/types.js';
@@ -1366,8 +1367,8 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
             type: 'boolean',
             description: 'Optional flag to add a watermark.',
           },
-          maxPolls: integerSchema('Optional max poll attempts.'),
-          pollIntervalMs: integerSchema('Optional poll interval in milliseconds.'),
+          maxPolls: integerSchema('Optional max poll attempts. The total wait is kept between 5 and 40 minutes.'),
+          pollIntervalMs: integerSchema('Optional poll interval in milliseconds, kept between 1000 and 30000.'),
           runInBackground: {
             type: 'boolean',
             description: 'Run asynchronously only when the generated file path is not needed before the next user turn. Omit or false when the current answer/workflow needs the video result.',
@@ -1438,8 +1439,8 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           lastFrameImagePaths: { type: 'array', description: 'role:"last_frame" local image paths.', items: { type: 'string' } },
           generateAudio: { type: 'boolean', description: 'Default true. The pipeline retries with audio off when the provider rejects audio output.' },
           watermark: { type: 'boolean', description: 'Optional watermark flag.' },
-          maxPolls: integerSchema('Optional max poll attempts per segment.'),
-          pollIntervalMs: integerSchema('Optional poll interval per segment.'),
+          maxPolls: integerSchema('Optional max poll attempts per segment. The total wait per attempt is kept between 5 and 40 minutes.'),
+          pollIntervalMs: integerSchema('Optional poll interval per segment in milliseconds, kept between 1000 and 30000.'),
           runInBackground: { type: 'boolean', description: 'Run asynchronously when the generated file path is not needed before the next user turn.' },
           narrativeEntities: {
             type: 'object',
@@ -2197,9 +2198,12 @@ export function mapProviderNativeToolCallToAction(
     };
   }
 
+  // A tool that limits its arguments gets only those: anything else in the
+  // call (an internal option, a key a prompt injection added) is dropped.
+  const args = stripUnknownActionArguments(call.name, parsedArguments as Record<string, unknown>);
   const action = {
     type: call.name,
-    ...parsedArguments,
+    ...args,
   } as AgentAction;
   const validationErrors = validateToolAction(action);
   if (validationErrors.length > 0) {

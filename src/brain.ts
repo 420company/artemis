@@ -50,7 +50,7 @@ import {
     projectDirectToolNames,
     widenProjectedDirectToolNames,
 } from './core/directToolProjection.js';
-import { getToolDefinition } from './tools/registry.js';
+import { getToolDefinition, stripUnknownActionArguments } from './tools/registry.js';
 import {
     getBackgroundTaskRegistry,
     type BackgroundTaskKind,
@@ -1548,6 +1548,11 @@ async function executeTool(name: any, input: any, opts: any) {
     );
 }
 
+/** Tests: run one tool the way a direct tool call does (permissions, approval, argument checks). */
+export function executeDirectToolForTest(name: string, input: Record<string, unknown>, opts: Record<string, unknown>) {
+    return executeTool(name, input, opts);
+}
+
 async function executeToolInner(name: any, input: any, opts: any) {
     const { cwd, permissionMode, onPermissionRequest, updateCwd, onWorkspaceSwitchRequest, onUserConfirmationRequest, readFileHistory } = opts;
     const argsRecord = (input && typeof input === 'object') ? input : {};
@@ -1624,7 +1629,9 @@ async function executeToolInner(name: any, input: any, opts: any) {
             },
         );
     }
-    const action = { type: name, ...input };
+    // A tool that limits its arguments gets only those (the same as a native
+    // tool call): a key it does not take is dropped, not an error.
+    const action = { type: name, ...stripUnknownActionArguments(String(name), argsRecord) };
     // Hosted conversations (chat bridges) share the brain session between
     // chats: a background result would land in whichever chat is active when
     // it finishes. There the tool runs in the foreground instead.
