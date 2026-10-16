@@ -274,11 +274,16 @@ export function chunkSerializedMessages(serialized: readonly string[], chunkToke
   return chunks
 }
 
-/** Strip leading <analysis>/<thinking> drafts some models emit before the answer. */
+/**
+ * Strip leading <analysis>/<thinking>/<think> drafts some models emit before
+ * the answer, and an echo of the cache-aware instruction's tag line
+ * (continuation.ts CONTINUATION_SUMMARY_TAG).
+ */
 export function cleanSummaryOutput(raw: string): string {
   let text = String(raw ?? '').trim()
   for (;;) {
-    const match = text.match(/^<(analysis|thinking)>[\s\S]*?<\/\1>\s*/)
+    const match = text.match(/^<(analysis|thinking|think)>[\s\S]*?<\/\1>\s*/) ??
+      text.match(/^\[Artemis (?:runtime: context compaction request|运行时：上下文压缩请求)\]\s*/)
     if (!match) break
     text = text.slice(match[0].length)
   }

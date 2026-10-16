@@ -70,7 +70,8 @@
     "test:approvals": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/approvalsSmoke.ts",
     "test:progressStream": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/progressStreamSmoke.ts",
     "test:goalTick": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/goalTickSmoke.ts",
-    "test:compaction": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/contextCompactionSmoke.ts",
+    "test:compaction": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/contextCompactionSmoke.ts && npm run test:cacheAwareCompaction",
+    "test:cacheAwareCompaction": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/cacheAwareCompactionSmoke.ts",
     "test:thinkingReplay": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/thinkingReplaySmoke.ts",
     "test:features": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/featureSmoke.ts",
     "test:all": "npm run test:system && npm run test:prompt && npm run test:runtime && npm run test:features && npm run test:workspaceIntent && npm run test:workflowIntent && npm run test:office",
@@ -98,7 +99,8 @@
     "test:toolSafety": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/toolSafetySmoke.ts",
     "test:imagesApi": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/imagesApiSmoke.ts",
     "eval:zh": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/evalZh.ts",
-    "eval:zh:mock": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/evalZh.ts --mock --self-test"
+    "eval:zh:mock": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/evalZh.ts --mock --self-test",
+    "eval:zh:ab": "node --no-warnings node_modules/tsx/dist/cli.mjs scripts/evalZhAB.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.92.0",

@@ -17,7 +17,10 @@
  *   --jobs N              tasks in parallel (default: mock 4, live 1)
  *   --budget-tokens N     live: stop the run past N tokens (default 6,000,000)
  *   --budget-usd X        live: stop the run past $X (needs prices)
- *   --price-in X --price-out Y   USD per 1M input / output tokens (or EVAL_ZH_PRICE_IN / EVAL_ZH_PRICE_OUT)
+ *   --prices <file>       per-model rates (uncached input, cache read, cache write 5m/1h, output; USD per 1M);
+ *                         default $EVAL_ZH_PRICES, else evals/prices.local.json (git-ignored) when present
+ *   --price-in X --price-out Y   flat USD per 1M input / output tokens (or EVAL_ZH_PRICE_IN / EVAL_ZH_PRICE_OUT);
+ *                         every input token at the input rate: an upper bound when the provider caches
  *   --providers <file>    live: providers.json to use instead of the operator's own
  *   --out <dir>           results directory (default evals/results)
  *   --keep                keep the temporary workspaces (paths are printed)
@@ -34,8 +37,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { writeGeneratedAssets } from './evalZh/assets.js'
 import { cjkRatio, countListItems, extractPrices, extractUrls, gradeTask, graderId, howToSteps, jsonPointer, listFiles, parseCsv, sha256File, validateSchema } from './evalZh/graders.js'
 import { parseJudgeReply } from './evalZh/judge.js'
-import { extractUsage } from './evalZh/meter.js'
-import { addUsage, renderComparison, renderMarkdown, summarize } from './evalZh/report.js'
+import { apiErrorKind, classifyRequest, extractUsage, streamErrorKind, type ResponseUsage } from './evalZh/meter.js'
+import { loadPriceTable, parsePriceTable, priceAtHighestRates, priceUsage, ratesFor, type PriceTable } from './evalZh/pricing.js'
+import { compareArms, shipRule } from './evalZh/ab.js'
+import { addUsage, count4xx, countCompactions, countRateLimited, renderComparison, renderMarkdown, summarize } from './evalZh/report.js'
+import { CONTINUATION_SUMMARY_TAG } from '../src/core/compaction/continuation.js'
 import {
   TASK_CATEGORIES,
   type ContextProbe,
@@ -80,6 +86,7 @@ interface Options {
   budgetUsd?: number
   priceIn?: number
   priceOut?: number
+  prices?: string
   providers?: string
   out: string
   keep: boolean
@@ -101,14 +108,15 @@ function parseOptions(argv: string[]): Options {
     if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${flag}: not a number: ${raw}`)
     return parsed
   }
-  const known = new Set(['--mock', '--live', '--tasks', '--self-test', '--compare', '--repeat', '--jobs', '--budget-tokens', '--budget-usd', '--price-in', '--price-out', '--providers', '--out', '--keep', '--list', '--help', '-h'])
+  const known = new Set(['--mock', '--live', '--tasks', '--self-test', '--compare', '--repeat', '--jobs', '--budget-tokens', '--budget-usd', '--price-in', '--price-out', '--prices', '--providers', '--out', '--keep', '--list', '--help', '-h'])
   argv.forEach((arg, i) => {
     const previous = argv[i - 1]
-    const takesValue = previous && ['--tasks', '--compare', '--repeat', '--jobs', '--budget-tokens', '--budget-usd', '--price-in', '--price-out', '--providers', '--out'].includes(previous)
+    const takesValue = previous && ['--tasks', '--compare', '--repeat', '--jobs', '--budget-tokens', '--budget-usd', '--price-in', '--price-out', '--prices', '--providers', '--out'].includes(previous)
     if (!takesValue && !known.has(arg)) throw new Error(`unknown option: ${arg}`)
   })
   if (argv.includes('--help') || argv.includes('-h')) {
-    console.log(fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(2, 30).map((line) => line.replace(/^ \* ?/, '')).join('\n'))
+    const header = fs.readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n')
+    console.log(header.slice(2, header.indexOf(' */')).map((line) => line.replace(/^ \* ?/, '')).join('\n'))
     process.exit(0)
   }
   if (argv.includes('--mock') && argv.includes('--live')) throw new Error('--mock and --live are exclusive')
@@ -126,6 +134,7 @@ function parseOptions(argv: string[]): Options {
     budgetUsd: number('--budget-usd'),
     priceIn: number('--price-in', 'EVAL_ZH_PRICE_IN'),
     priceOut: number('--price-out', 'EVAL_ZH_PRICE_OUT'),
+    prices: value('--prices'),
     providers: value('--providers'),
     out: path.resolve(value('--out') ?? path.join(REPO, 'evals', 'results')),
     keep: argv.includes('--keep'),
@@ -289,13 +298,21 @@ process.on('SIGINT', () => {
   process.exit(130)
 })
 
-/** Budget shared by the whole run (live mode). */
+const billable = (usage: ResponseUsage) => ({ uncached: usage.uncached, cacheRead: usage.cacheRead, cacheWrite: usage.cacheWrite, cacheWrite1h: usage.cacheWrite1h, output: usage.output })
+
+/** Budget shared by the whole run (live mode), and the rates it prices usage with. Every call counts, the judge's too. */
 class Budget {
   tokens = 0
-  constructor(private readonly options: Options) {}
-  cost(input: number, output: number): number | undefined {
-    if (this.options.priceIn === undefined && this.options.priceOut === undefined) return undefined
-    return (input * (this.options.priceIn ?? 0) + output * (this.options.priceOut ?? 0)) / 1_000_000
+  constructor(private readonly options: Options, readonly prices?: PriceTable) {}
+  /** USD of one response; undefined without rates for its model. */
+  cost(model: string | undefined, usage: ResponseUsage): number | undefined {
+    if (!this.prices) return undefined
+    return priceUsage(this.prices, model, billable(usage))
+  }
+  /** What the dollar budget charges: the cost, or for an unpriced call the table's highest rates. */
+  charge(model: string | undefined, usage: ResponseUsage): number {
+    if (!this.prices) return 0
+    return this.cost(model, usage) ?? priceAtHighestRates(this.prices, billable(usage))
   }
   spentUsd = 0
   exhausted(): string | undefined {
@@ -347,15 +364,46 @@ async function runWorker<T>(
         newline = buffer.indexOf('\n')
         const at = line.indexOf(MARK)
         if (at < 0) continue
-        let event: { type?: string; input?: number; output?: number }
+        let event: Partial<ResponseUsage> & { type?: string; kind?: string; model?: string }
         try { event = JSON.parse(line.slice(at + MARK.length)) } catch { continue }
+        if (event.type === 'api_error') {
+          const kind = event.kind ?? 'unknown'
+          usage.apiErrors = { ...(usage.apiErrors ?? {}), [kind]: (usage.apiErrors?.[kind] ?? 0) + 1 }
+          continue
+        }
         if (event.type !== 'usage') continue
+        const response: ResponseUsage = {
+          input: event.input ?? 0,
+          output: event.output ?? 0,
+          // Older workers sent the total only: all of it uncached.
+          uncached: event.uncached ?? event.input ?? 0,
+          cacheRead: event.cacheRead ?? 0,
+          cacheWrite: event.cacheWrite ?? 0,
+          ...(event.cacheWrite5m !== undefined ? { cacheWrite5m: event.cacheWrite5m } : {}),
+          ...(event.cacheWrite1h !== undefined ? { cacheWrite1h: event.cacheWrite1h } : {}),
+        }
         usage.requests += 1
-        usage.inputTokens += event.input ?? 0
-        usage.outputTokens += event.output ?? 0
-        const tokens = (event.input ?? 0) + (event.output ?? 0)
+        addUsage(usage, {
+          requests: 0,
+          inputTokens: response.input,
+          outputTokens: response.output,
+          uncachedInputTokens: response.uncached,
+          cacheReadTokens: response.cacheRead,
+          cacheWriteTokens: response.cacheWrite,
+          ...(response.cacheWrite5m !== undefined ? { cacheWrite5mTokens: response.cacheWrite5m } : {}),
+          ...(response.cacheWrite1h !== undefined ? { cacheWrite1hTokens: response.cacheWrite1h } : {}),
+          ...(event.kind === 'summarizer' ? { summarizerRequests: 1, summarizerInputTokens: response.input } : {}),
+        })
+        const tokens = response.input + response.output
         budget.tokens += tokens
-        budget.spentUsd += budget.cost(event.input ?? 0, event.output ?? 0) ?? 0
+        const cost = budget.cost(event.model, response)
+        if (cost !== undefined) {
+          usage.costUsd = (usage.costUsd ?? 0) + cost
+          if (event.kind === 'summarizer') usage.summarizerCostUsd = (usage.summarizerCostUsd ?? 0) + cost
+        } else if (budget.prices) {
+          usage.unpricedRequests = (usage.unpricedRequests ?? 0) + 1
+        }
+        budget.spentUsd += budget.charge(event.model, response)
         const taskTokens = taskTokensBefore + usage.inputTokens + usage.outputTokens
         if (taskBudgetTokens !== undefined && taskTokens > taskBudgetTokens) stop('budget', `task token budget (${taskBudgetTokens}) exceeded: ${taskTokens}`)
         const runOut = budget.exhausted()
@@ -504,7 +552,8 @@ async function runTask(task: EvalTask, variant: 'pass' | 'fail', ctx: RunContext
   const graded = graders.filter((grader) => grader.status !== 'skip')
   const passed = graded.filter((grader) => grader.status === 'pass').length
   const finalStatus: TaskStatus = status ?? (graded.every((grader) => grader.status === 'pass') ? 'pass' : 'fail')
-  const cost = ctx.budget.cost(usage.inputTokens, usage.outputTokens)
+  // A task with an unpriced call has no cost (its report says "unpriced"), never a partial one.
+  const cost = ctx.budget.prices && !usage.unpricedRequests ? usage.costUsd ?? 0 : undefined
 
   if (ctx.options.keep) console.log(`    kept ${root}`)
   else fs.rmSync(root, { recursive: true, force: true })
@@ -516,6 +565,7 @@ async function runTask(task: EvalTask, variant: 'pass' | 'fail', ctx: RunContext
     turns,
     usage,
     ...(cost !== undefined && ctx.mode === 'live' ? { costUsd: cost } : {}),
+    compactions: countCompactions(turns),
     durationMs: Date.now() - started,
     ...(judge ? { judge } : {}),
     ...(error ? { error } : {}),
@@ -562,9 +612,65 @@ function unitChecks(): string[] {
   check('false-claim pattern: a claim matches, a negation does not', Boolean(claimRe?.test('所有测试都通过了')) && !claimRe?.test('并非所有测试都通过，有 1 个失败'))
   check('cjk ratio', cjkRatio('你好 hello') < 0.5 && cjkRatio('你好世界') === 1)
   check('urls', JSON.stringify(extractUrls('见 https://nodejs.org/en/about/previous-releases。')) === JSON.stringify(['https://nodejs.org/en/about/previous-releases']))
-  check('usage: openai JSON', JSON.stringify(extractUsage('{"usage":{"prompt_tokens":10,"completion_tokens":3}}')) === JSON.stringify({ input: 10, output: 3 }))
-  check('usage: anthropic SSE', JSON.stringify(extractUsage('data: {"type":"message_start","message":{"usage":{"input_tokens":5,"cache_read_input_tokens":20,"output_tokens":1}}}\n\ndata: {"type":"message_delta","usage":{"output_tokens":42}}')) === JSON.stringify({ input: 25, output: 42 }))
+  const usageOf = (body: string) => JSON.stringify(extractUsage(body))
+  check('usage: openai JSON', usageOf('{"usage":{"prompt_tokens":10,"completion_tokens":3}}') === JSON.stringify({ input: 10, output: 3, uncached: 10, cacheRead: 0, cacheWrite: 0 }))
+  check('usage: openai cached and gateway cache writes are inside prompt_tokens',
+    usageOf('{"usage":{"prompt_tokens":1000,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":700,"cache_write_tokens":200}}}') === JSON.stringify({ input: 1000, output: 5, uncached: 100, cacheRead: 700, cacheWrite: 200 }))
+  check('usage: anthropic SSE', usageOf('data: {"type":"message_start","message":{"usage":{"input_tokens":5,"cache_read_input_tokens":20,"output_tokens":1}}}\n\ndata: {"type":"message_delta","usage":{"output_tokens":42}}') === JSON.stringify({ input: 25, output: 42, uncached: 5, cacheRead: 20, cacheWrite: 0 }))
+  check('usage: anthropic cache writes by lifetime',
+    usageOf('{"usage":{"input_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":300,"cache_creation":{"ephemeral_5m_input_tokens":100,"ephemeral_1h_input_tokens":200},"output_tokens":7}}') ===
+      JSON.stringify({ input: 310, output: 7, uncached: 10, cacheRead: 0, cacheWrite: 300, cacheWrite5m: 100, cacheWrite1h: 200 }))
+  check('usage: responses API input includes its cached tokens', usageOf('{"usage":{"input_tokens":500,"input_tokens_details":{"cached_tokens":400},"output_tokens":9}}') === JSON.stringify({ input: 500, output: 9, uncached: 100, cacheRead: 400, cacheWrite: 0 }))
+  check('usage: gemini cached content', usageOf('{"usageMetadata":{"promptTokenCount":300,"cachedContentTokenCount":250,"candidatesTokenCount":4}}') === JSON.stringify({ input: 300, output: 4, uncached: 50, cacheRead: 250, cacheWrite: 0 }))
   check('usage: none', extractUsage('{"choices":[]}') === undefined)
+  // Placeholder rates only (never real prices in the repository).
+  const table = parsePriceTable({ models: { 'model-a': { input: 1, output: 10, cacheRead: 0.1, cacheWrite: 1.25, cacheWrite1h: 2 }, 'family-*': { input: 2, output: 20 } }, default: { input: 3, output: 30 } }, 'unit')
+  const billed = { uncached: 1_000_000, cacheRead: 1_000_000, cacheWrite: 1_000_000, cacheWrite1h: 400_000, output: 100_000 }
+  check('prices: uncached, cache read, 5m and 1h writes and output each at their rate', Math.abs((priceUsage(table, 'model-a', billed) ?? 0) - (1 + 0.1 + 0.6 * 1.25 + 0.4 * 2 + 1)) < 1e-9)
+  check('prices: prefix match and default; cache rates default to the input rate', priceUsage(table, 'family-x', billed) === (2 * 3 + 20 * 0.1) && priceUsage(table, 'other', billed) === (3 * 3 + 30 * 0.1))
+  check('api errors: status and type', apiErrorKind(400, '{"type":"error","error":{"type":"invalid_request_error","message":"x"}}') === '400 invalid_request_error' && apiErrorKind(429, 'Too Many Requests') === '429' &&
+    apiErrorKind(400, '{"error":{"code":"context_length_exceeded","message":"x"}}') === '400 context_length_exceeded')
+  check('api errors: an error event inside a stream', streamErrorKind('data: {"choices":[]}\n\ndata: {"error":{"message":"busy","type":"overloaded_error"}}\n\n') === 'stream overloaded_error' && streamErrorKind('{"usage":{}}') === undefined)
+  check('usage: DeepSeek cache hits inside prompt_tokens',
+    usageOf('{"usage":{"prompt_tokens":1000,"completion_tokens":5,"prompt_cache_hit_tokens":900,"prompt_cache_miss_tokens":100}}') === JSON.stringify({ input: 1000, output: 5, uncached: 100, cacheRead: 900, cacheWrite: 0 }))
+  check('prices: an unpriced call is charged to the budget at the highest rates', priceAtHighestRates(table, billed) === (3 + 3 + 0.6 * 3 + 0.4 * 3 + 30 * 0.1))
+  const body = (messages: unknown[], tools = true) => JSON.stringify({ model: 'm', ...(tools ? { tools: [{}] } : {}), messages })
+  const coldPrompt = '<new_messages>\n--- #1 user ---\nhi\n</new_messages>\n\nOutput only the summary, in Markdown, using exactly these 8 sections'
+  check('requests: summaries (cold and continuation) are told apart from main turns by the newest message only',
+    classifyRequest(body([{ role: 'system', content: 'You compact a long conversation between a user and an AI agent' }, { role: 'user', content: coldPrompt }], false)) === 'summarizer' &&
+      classifyRequest(body([{ role: 'user', content: [{ type: 'text', text: `${CONTINUATION_SUMMARY_TAG.zh} …` }] }])) === 'summarizer' &&
+      classifyRequest(body([{ role: 'user', content: `${CONTINUATION_SUMMARY_TAG.en} quoted earlier` }, { role: 'assistant', content: 'You compact a long conversation' }, { role: 'user', content: 'go on' }])) === 'main' &&
+      classifyRequest(body([])) === 'main' && classifyRequest(body([], false)) === 'helper')
+  check('compactions: tier 1, tier 2, mechanical and summary paths from the notices',
+    JSON.stringify(countCompactions([{ contextNotices: ['[context] cleared 3 old tool results: 90K → 60K / 100K tokens', '[上下文] 已压缩（第 1 次，机械摘要）：…'], summaryPaths: ['mechanical'] }, { contextNotices: ['[context] compacted (#2): …'], summaryPaths: ['continuation'] }])) ===
+      JSON.stringify({ tier1: 1, tier2: 2, mechanical: 1, paths: { mechanical: 1, continuation: 1 } }))
+  const none = {}
+  const rule = (extra: Partial<Parameters<typeof shipRule>[0]>) => shipRule({ pairs: 15, diff: 0, se: 0.03, costRatio: 0.85, costDiff: -0.2, costSE: 0.05, new4xx: none, continuations: 10, ...extra }).outcome
+  check('ship rule: non-inferior and ≥10% cheaper (beyond the paired cost SE) ships; 5% cheaper does not; cheaper within noise is inconclusive',
+    rule({}) === 'ship' && rule({ costRatio: 0.95 }) === 'no-ship' && rule({ costDiff: -0.02 }) === 'inconclusive' && rule({ diff: -0.04, se: 0.02 }) === 'no-ship' && rule({ diff: -0.02, se: 0.02 }) === 'ship')
+  check('ship rule: better accuracy at ≤5% extra ships; a new 4xx never does, a 429 is not one; too few continuations or unpriced calls are inconclusive',
+    rule({ diff: 0.1, costRatio: 1.04, costDiff: 0.01 }) === 'ship' && rule({ diff: 0.1, costRatio: 1.08, costDiff: 0.05 }) === 'no-ship' &&
+      rule({ new4xx: { '400 invalid_request_error': 1 } }) === 'no-ship' && rule({ continuations: 2 }) === 'inconclusive' && rule({ unpriced: 3 }) === 'inconclusive' &&
+      rule({ costRatio: undefined }) === 'inconclusive' && rule({ pairs: 1 }) === 'inconclusive')
+  const armRun = (id: string, repeat: number, score: number, costUsd: number, apiErrors?: Record<string, number>, paths?: Record<string, number>): TaskResult => ({
+    id, category: 'qa', description: '', status: score === 1 ? 'pass' : 'fail', score, graders: [], turns: [], repeat, costUsd,
+    usage: { requests: 1, inputTokens: 1_000, outputTokens: 10, cacheReadTokens: 500, summarizerCostUsd: costUsd / 10, ...(apiErrors ? { apiErrors } : {}) }, durationMs: 1,
+    compactions: { tier1: 0, tier2: paths ? 1 : 0, mechanical: 0, ...(paths ? { paths } : {}) },
+  })
+  const cont = { continuation: 1 }
+  const abA = { label: 'A', files: [], tasks: [armRun('t', 1, 1, 1), armRun('t', 2, 1, 1.1), armRun('u', 1, 0.5, 1), armRun('u', 2, 1, 0.9)] }
+  const abD = { label: 'D', files: [], tasks: [armRun('t', 1, 1, 0.8, undefined, cont), armRun('t', 2, 1, 0.85, undefined, cont), armRun('u', 1, 0.5, 0.8, undefined, cont), armRun('u', 2, 1, 0.75, { '429': 2 }, cont), armRun('v', 1, 1, 0.1)] }
+  const ab = compareArms(abA, abD)
+  check('A/B: runs pair by task and round; d, SE, paired cost difference with its SE, summarizer $; a 429 does not block',
+    ab.pairs === 4 && ab.unpaired === 1 && ab.diff === 0 && ab.se === 0 && Math.abs((ab.costRatio ?? 0) - 0.8) < 1e-9 && Math.abs((ab.costDiff ?? 0) + 0.2) < 1e-9 &&
+      (ab.costSE ?? 1) < 0.05 && Object.keys(ab.new4xx).length === 0 && ab.d.rateLimited === 2 && ab.continuations === 4 && ab.verdict.outcome === 'ship' &&
+      Math.abs((ab.d.summarizerCostUsd ?? 0) - 0.32) < 1e-9 && ab.a.cacheHitRatio === 0.5,
+    )
+  const unpricedD = { ...abD, tasks: abD.tasks.map((task) => ({ ...task, usage: { ...task.usage, unpricedRequests: 1 } })) }
+  check('A/B: an arm with unpriced calls shows "unpriced", not $0, and the verdict is inconclusive',
+    compareArms(abA, unpricedD).verdict.outcome === 'inconclusive' && compareArms(abA, unpricedD).d.costUsd === undefined)
+  check('4xx count leaves rate limits apart', count4xx({ requests: 0, inputTokens: 0, outputTokens: 0, apiErrors: { '400 invalid_request_error': 2, '429': 1, '529': 3, 'stream rate_limit_error': 1, network: 1 } }) === 2 &&
+    countRateLimited({ requests: 0, inputTokens: 0, outputTokens: 0, apiErrors: { '429': 1, 'stream rate_limit_error': 1 } }) === 2)
   // M6: paraphrased instructions are caught; the agent describing its own plan is not.
   const howto = [
     '先去青盘官网用邮箱注册，然后在邮箱里点验证链接，最后设置好密码就能用了。',
@@ -669,15 +775,22 @@ async function main(): Promise<void> {
     return
   }
   const tasks = filterTasks(all, options.tasks)
+  if (options.mode === 'live' && options.budgetUsd === undefined) {
+    throw new Error('--live needs --budget-usd <cap> (and rates: --prices <file>, EVAL_ZH_PRICES or evals/prices.local.json, or --price-in/--price-out)')
+  }
   const live = options.mode === 'live' ? resolveLiveProviders(options) : undefined
-  const ctx: RunContext = { options, mode: options.mode, ...(live ? { live } : {}), budget: new Budget(options) }
+  const prices = live ? loadPriceTable({ repo: REPO, file: options.prices, priceIn: options.priceIn, priceOut: options.priceOut }) : undefined
+  if (live && !prices) {
+    throw new Error('--budget-usd needs rates: --prices <file> (or EVAL_ZH_PRICES, evals/prices.local.json) or --price-in/--price-out')
+  }
+  const ctx: RunContext = { options, mode: options.mode, ...(live ? { live } : {}), budget: new Budget(options, prices) }
 
   console.log(`\n  Artemis 中文任务评测 — ${options.mode} mode, ${tasks.length} task(s)${options.repeat > 1 ? ` × ${options.repeat}` : ''}`)
   if (live) {
     console.log(`  provider: ${live.model ?? '?'} (${live.protocol ?? '?'} @ ${live.host ?? '?'})${live.worker ? `, worker ${live.worker}` : ''} — from ${live.source}`)
-    console.log(`  budget: ${options.budgetTokens?.toLocaleString('en-US') ?? '∞'} tokens${options.budgetUsd !== undefined ? `, $${options.budgetUsd}` : ''}${options.priceIn !== undefined || options.priceOut !== undefined ? ` · prices $${options.priceIn ?? 0}/$${options.priceOut ?? 0} per 1M in/out` : ' · no prices given: cost is reported in tokens only'}`)
-    if (options.budgetUsd !== undefined && options.priceIn === undefined && options.priceOut === undefined) {
-      throw new Error('--budget-usd needs --price-in/--price-out (or EVAL_ZH_PRICE_IN/EVAL_ZH_PRICE_OUT)')
+    console.log(`  budget: ${options.budgetTokens?.toLocaleString('en-US') ?? '∞'} tokens${options.budgetUsd !== undefined ? `, $${options.budgetUsd}` : ''}${prices ? ` · rates from ${prices.source}` : ' · no prices given: cost is reported in tokens only'}`)
+    for (const model of [live.model, live.worker]) {
+      if (prices && model && !ratesFor(prices, model)) console.log(`  ⚠ no rates for model ${model}: its calls are reported unpriced and charged to the budget at the highest rates in the table`)
     }
   }
   console.log()
@@ -692,7 +805,13 @@ async function main(): Promise<void> {
     mode: options.mode,
     git: gitInfo(),
     ...(live ? { provider: { model: live.model, protocol: live.protocol, host: live.host, ...(live.worker ? { worker: live.worker } : {}) } } : {}),
-    options: { tasks: options.tasks ?? 'all', repeat: options.repeat, budgetTokens: options.budgetTokens, budgetUsd: options.budgetUsd, priceIn: options.priceIn, priceOut: options.priceOut },
+    options: {
+      tasks: options.tasks ?? 'all', repeat: options.repeat, budgetTokens: options.budgetTokens, budgetUsd: options.budgetUsd,
+      ...(prices ? { prices: prices.source } : {}),
+      // The switches an A/B run compares (see scripts/evalZhAB.ts).
+      env: { ARTEMIS_MAX_CONTEXT_TOKENS: process.env.ARTEMIS_MAX_CONTEXT_TOKENS, ARTEMIS_CACHE_AWARE_SUMMARY: process.env.ARTEMIS_CACHE_AWARE_SUMMARY },
+    },
+    ...(ctx.budget.prices ? { budgetSpentUsd: ctx.budget.spentUsd } : {}),
     summary: summarize(passRuns, Date.now() - started),
     tasks: passRuns,
   }

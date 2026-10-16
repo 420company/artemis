@@ -11,6 +11,10 @@
  *   fallback summarizer failed or unavailable: a mechanical summary that is
  *            guaranteed to fit, with a marker
  *
+ * Tier 2 can write its summary as a continuation of the main conversation
+ * (continuation.ts, opt-in): the provider then reads the history from its
+ * prompt cache. When that is not possible the cold summarizer runs as before.
+ *
  * Both runtimes use it: path A (runAgent, web sessions) and path B (think(),
  * bridges and the interactive CLI).
  */
@@ -27,6 +31,7 @@ import {
   type ContextState,
 } from './accounting.js'
 import type { ContextBudget } from './budget.js'
+import { summarizeByContinuation, type ContinuationAttempt, type ContinuationSummarizeFn } from './continuation.js'
 import { detectConversationLanguage, isSyntheticUserMessage, type ConversationLanguage } from './language.js'
 import { buildRestorationSections, type RestorationSection, type RestoreOptions } from './restore.js'
 import type { ContextStorage } from './storage.js'
@@ -61,6 +66,12 @@ export type ManageContextInput = {
   state: ContextState
   storage?: ContextStorage
   summarize?: SummarizeFn
+  /**
+   * Cache-aware summaries (opt-in): tried before `summarize` for a proactive
+   * or manual tier-2 compaction of an unrepaired history. When it is
+   * skipped or fails, `summarize` runs as usual.
+   */
+  continueSummary?: ContinuationSummarizeFn
   /** Context window of the summarizer model (defaults to the budget window). */
   summarizerWindow?: number
   restore?: RestoreOptions
@@ -94,6 +105,14 @@ export type ManageContextResult = {
   /** Summarizer input spent by this compaction (retries included). */
   summarizerInputTokens?: number
   summarizerError?: string
+  /**
+   * How a tier-2 summary was written: a continuation of the cached
+   * conversation, the cold summarizer, the mechanical fallback, or reused
+   * from a crashed attempt of the same compaction.
+   */
+  summaryPath?: 'continuation' | 'cold' | 'mechanical' | 'reused'
+  /** Why a configured continuation did not produce the summary. */
+  continuationSkipped?: string
   /** Short, user-facing line describing what happened (absent for 'none'/'repair'). */
   notice?: string
   /** The fixed part alone does not fit the window; the request will likely fail. */
@@ -419,6 +438,27 @@ function shrinkMessage(message: SessionMessage, tokens: number, archivePath: str
   return { ...rest, content }
 }
 
+/** A cache-aware summary, or why there is none (the cold summarizer then runs). */
+async function continuationSummary(
+  continueSummary: ContinuationSummarizeFn,
+  input: {
+    blocked?: string
+    history: readonly SessionMessage[]
+    keptFrom?: SessionMessage
+    language: ConversationLanguage
+    maxSummaryTokens: number
+  },
+): Promise<ContinuationAttempt> {
+  if (input.blocked) return { status: 'skipped', reason: input.blocked }
+  return summarizeByContinuation({
+    continueSummary,
+    history: input.history,
+    keptFrom: input.keptFrom,
+    language: input.language,
+    maxSummaryTokens: input.maxSummaryTokens,
+  })
+}
+
 // ── main entry ──────────────────────────────────────────────────────────────
 
 /** Gain below which an LLM summary is not worth its cost (mechanical summary instead). */
@@ -615,9 +655,26 @@ async function manageContextInner(input: ManageContextInput): Promise<ManageCont
     pending.archivedIds.every((id) => archivedIds.has(id))
   const middleTokens = estimateMessagesTokens(middle)
   const worthSummarizing = reason !== 'proactive' || middleTokens - summaryTokens >= minimumSummaryGain(budget)
+  const continued = input.continueSummary && input.summarize && !reusable && worthSummarizing && summarizerAllowed(state, now)
+    ? await continuationSummary(input.continueSummary, {
+      // Re-sent exactly as the last request carried it: not a history this
+      // call had to repair, nor one the provider already refused as too large.
+      blocked: repaired.changed ? 'the history needed repair'
+        : reason === 'overflow' || before > budget.effective ? 'the history does not fit the window' : undefined,
+      history: repaired.messages,
+      keptFrom: tail[0],
+      language,
+      maxSummaryTokens: summaryTokens,
+    })
+    : undefined
   if (reusable) {
     summary = pending.summary
     mode = pending.mode
+  } else if (continued?.status === 'ok') {
+    summary = continued.summary
+    summarizerCalls = 1
+    summarizerInputTokens = continued.inputTokens
+    recordSummarizerSuccess(state)
   } else if (input.summarize && worthSummarizing && summarizerAllowed(state, now)) {
     try {
       const result = await summarizeHistory({
@@ -813,6 +870,9 @@ async function manageContextInner(input: ManageContextInput): Promise<ManageCont
   invalidateUsageAnchor(state)
   const after = sizeOf(messages)
   const action: ManageAction = mode === 'fallback' ? 'fallback' : 'summary'
+  const summaryPath: ManageContextResult['summaryPath'] = reusable ? 'reused'
+    : mode === 'fallback' ? 'mechanical'
+    : continued?.status === 'ok' ? 'continuation' : 'cold'
   return finish(action, {
     tokensAfter: after,
     clearedToolResults: cleared,
@@ -821,6 +881,8 @@ async function manageContextInner(input: ManageContextInput): Promise<ManageCont
     summarizerCalls,
     summarizerInputTokens,
     summarizerError,
+    ...(input.continueSummary ? { summaryPath } : {}),
+    ...(continued && continued.status !== 'ok' ? { continuationSkipped: continued.reason } : {}),
     overBudget: after > budget.effective,
     notice: buildNotice({
       language, action, before, after, window: budget.window,

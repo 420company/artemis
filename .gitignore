@@ -33,6 +33,9 @@ Thumbs.db
 
 # Eval run outputs (see evals/zh/README.md)
 evals/results/
+# Local eval rates (USD per 1M tokens; never committed — see evals/prices.example.json)
+evals/prices.local.json
+evals/*.local.json
 
 # Test artifacts
 test-output/
