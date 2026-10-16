@@ -23,10 +23,10 @@ can be compared **before and after** on the same tasks.
 npm run eval:zh:mock
 
 # Live, with the provider you configured for Artemis (costs money — see "Cost")
-npm run eval:zh -- --live --tasks category:writing,qa-savings-math
+npm run eval:zh -- --live --budget-usd 5 --tasks category:writing,qa-savings-math
 
 # The whole set, three times each, compared with an earlier run
-npm run eval:zh -- --live --repeat 3 --compare evals/results/2026-10-01T09-00-00-000Z.json
+npm run eval:zh -- --live --budget-usd 40 --repeat 3 --compare evals/results/2026-10-01T09-00-00-000Z.json
 
 # Task list
 npm run eval:zh -- --list
@@ -86,8 +86,9 @@ feature switch); in mock mode credentials are stripped from it.
 | `--repeat N` | run each task N times; pass rates become fractions. Live models are noisy: use 3+ before trusting a small difference |
 | `--jobs N` | tasks in parallel (mock 4, live 1 by default) |
 | `--budget-tokens N` | stop the run once N tokens are used (live default 6,000,000); the running task is killed, the rest are `skipped` |
-| `--budget-usd X` | same in dollars; needs prices |
-| `--price-in X --price-out Y` | USD per 1M input/output tokens (or `EVAL_ZH_PRICE_IN` / `EVAL_ZH_PRICE_OUT`) |
+| `--budget-usd X` | **required with `--live`**: stop the run once $X is charged. Every call counts (judge and helpers too); a call whose model has no rates is charged at the highest rates in the table |
+| `--prices <file>` | per-model rates (see "Cost"); default `$EVAL_ZH_PRICES`, else `evals/prices.local.json` when it exists |
+| `--price-in X --price-out Y` | flat USD per 1M input/output tokens (or `EVAL_ZH_PRICE_IN` / `EVAL_ZH_PRICE_OUT`): every input token at the input rate, an upper bound when the provider caches; a rate file's models take precedence |
 | `--compare old.json` | per-category and per-task deltas (pass rate, score, tokens, cost, time) |
 | `--keep` | keep the temporary workspaces (paths are printed) for debugging |
 | `--out dir` | results directory |
@@ -101,9 +102,30 @@ killed and reported as `budget`.
 Tokens are metered at the HTTP layer from the usage the provider reports,
 for **every** model call (main turns, sub-agents, compaction summaries,
 memory and skill curators, the judge) — not only the main turns the engine
-logs. Input tokens include cached tokens, so a cost computed from list prices
-is an **upper bound** when your provider caches prompts (most do; the system
-prompt and tool schemas, ~20K tokens per request, are the same every turn).
+logs. Input is split the way providers bill it: **uncached input**, **cache
+reads**, **cache writes** (5-minute and 1-hour parts when the provider
+reports them) and **output**, per model (the `model` of each request).
+`inputTokens` stays the total of the three input parts (the context size).
+
+Rates are never committed. Put them in `evals/prices.local.json`
+(git-ignored), or any file passed with `--prices` / `EVAL_ZH_PRICES`; the
+format is in `evals/prices.example.json` (placeholder numbers only). USD per
+1M tokens; `cacheRead` and `cacheWrite` default to `input`, `cacheWrite1h`
+to `cacheWrite`; a key ending in `*` matches a model id prefix, and
+`default` covers the rest. A call whose model has no rates makes its task's
+and the run's cost **unpriced** (never a partial sum or $0); the summary
+says how many calls had no rates. DeepSeek's
+`prompt_cache_hit_tokens` count as cache reads.
+
+Per run the summary also reports the **cache-hit ratio** (cache reads ÷ all
+input), cache-write tokens, **compactions** (tier 1: old tool results
+cleared; tier 2: summarized, by path when the engine logs it), the
+**summarizer's requests, input tokens and cost** (cold summarizer and
+cache-aware continuation alike; a request counts as a summary by its
+newest message only), **API errors by type** (`400
+invalid_request_error`, `429`, `stream overloaded_error`, `network`, …;
+rate limits are counted apart from other 4xx) and the cost per completed
+(passed) task.
 
 Rough size of one full pass (31 tasks): the scripted mock run, with the
 minimum number of turns, uses about 1.6M tokens; a real model typically
@@ -112,12 +134,77 @@ takes 2–3× as many turns, so plan for **3–5M tokens per pass**. Cost ≈
 fraction of the total. Start with `--tasks` on one category, read the numbers in
 the summary, then scale up.
 
+### A/B: cache-aware compaction summaries
+
+`npm run eval:zh:ab` compares two arms on the long tasks
+(`long-context-recall`, `memory-skill-reuse` and the `multistep` category)
+with `ARTEMIS_MAX_CONTEXT_TOKENS=60000`, so they compact:
+
+- **A** — current behaviour (`ARTEMIS_CACHE_AWARE_SUMMARY=0`): tier-2
+  summaries go to a separate, cold summarizer request;
+- **D** — `ARTEMIS_CACHE_AWARE_SUMMARY=1`: the summary continues the main
+  conversation's cached prefix. When compaction summaries go to another
+  model (a worker or an `auxiliaryModels.compression` route), `=1` keeps
+  them cold; run D with `--d-mode main` (`ARTEMIS_CACHE_AWARE_SUMMARY=main`)
+  to write them on the main model. The dry run and `--live` warn when that
+  is the case.
+
+```bash
+# The plan and a cost estimate; nothing is sent to a paid model (the estimate runs the mock once, offline)
+npm run eval:zh:ab -- --prices evals/prices.local.json --model <main model id>
+
+# The experiment: 3 rounds, arms in alternating order (A,D / D,A / A,D); costs money
+npm run eval:zh:ab -- --live --repeat 3 --budget-usd <cap>
+
+# Only the table, from a finished run (directories or result files)
+npm run eval:zh:ab -- --compare evals/results/ab-<stamp>/A evals/results/ab-<stamp>/D
+
+# The harness end to end against the mock model (free; no real signal)
+npm run eval:zh:ab -- --mock --repeat 2
+```
+
+The table pairs the runs of each task and round and shows, per arm: tasks
+completed, accuracy (mean grader score), $ total, **$ per completed task**
+and $ for summaries alone, the input split, the cache-hit ratio,
+compactions by path, summarizer input, 4xx errors and rate limits; then
+**d** (mean paired score difference D − A) with its standard error **SE**,
+and the paired cost difference per run with its own SE. The verdict:
+
+- **inconclusive** — fewer than 2 pairs; D wrote fewer than 3 summaries by
+  continuation (the feature barely ran); calls without rates; or D ≥ 10%
+  cheaper per completed task but the paired cost difference within its SE;
+- **do not ship** — a new 4xx error in D (per error type, D's count above
+  A's; 429 rate limits are reported but do not block), accuracy worse than
+  the non-inferiority margin (d − SE < −margin, `--margin`, default 0.05),
+  or not cheap enough for the accuracy it brings;
+- **ship** — accuracy non-inferior (d − SE ≥ −margin) **and** D at least 10%
+  cheaper per completed task beyond the paired cost noise, **or** accuracy
+  better (d > SE) at no more than 5% extra cost per completed task.
+
+`--live` needs `--budget-usd` for the whole experiment; each arm run gets
+what is left divided by the runs left, and the experiment stops when it is
+used up.
+
+`long-context-recall` compacts on the first request of its run, before the
+session has sent anything: D takes the cold path there by design (no
+cache to read yet). The compactions D changes are the ones during a run,
+in the multi-step tasks. A task's own `setup.maxContextTokens` wins over the
+environment cap.
+
+Size of one full run (5 tasks × 3 rounds × 2 arms = 30 task runs), from the
+dry run: about **11.5M tokens** (the mock's tokens × 2.5; assumed 30%
+uncached / 60% cache read / 10% cache write, output 2% of input), at most
+**13.8M** (every task at its token budget; the dry run prices that
+ceiling with every input token at the cache-write rate). Run the dry run
+with your rates to see dollars before approving `--live`.
+
 ## Results
 
 `evals/results/<timestamp>.json`:
 
 - `summary`: pass rate and mean grader score, overall and per category;
-  tokens, cost, wall time;
+  tokens (with the uncached / cache read / cache write split, summarizer
+  input and API errors), cost, compactions, wall time;
 - `tasks[]`: status (`pass` / `fail` / `error` / `timeout` / `budget` /
   `skipped`), each grader's verdict and detail, the judge's score and reasons,
   and per user message the reply, the tool trace (name, arguments, ok,
@@ -311,7 +398,9 @@ tasks independent and cheap; never point a task at a real paid service.
 - `scripts/evalZh.ts` — the runner (options, task loading, budgets, report, compare, self-test)
 - `scripts/evalZh/worker.ts` — one user message (or one judge call) in its own process
 - `scripts/evalZh/mockServer.ts` — the scripted model
-- `scripts/evalZh/meter.ts` — token metering, context probes, the mock-mode network guard
+- `scripts/evalZh/meter.ts` — token metering (billing split, request kind, API errors), context probes, the mock-mode network guard
+- `scripts/evalZh/pricing.ts` — per-model rates (local file, never committed) and pricing
+- `scripts/evalZhAB.ts`, `scripts/evalZh/ab.ts` — the A/B experiment for cache-aware compaction summaries: plan, estimate, runs, paired table and ship rule
 - `scripts/evalZh/graders.ts`, `judge.ts`, `report.ts`, `assets.ts`, `types.ts`
 
 ## Known limitations
