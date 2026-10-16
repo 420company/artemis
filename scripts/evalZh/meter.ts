@@ -57,10 +57,12 @@ const has = (text: string, key: string): boolean => new RegExp(`"${key}"\\s*:\\s
  *   Anthropic messages    input_tokens is the uncached part; cache reads and
  *                         writes are separate (cache_creation.ephemeral_5m/1h)
  *   OpenAI responses      input_tokens includes input_tokens_details.cached_tokens
+ *   Gemini output         candidatesTokenCount + thoughtsTokenCount
  */
 export function extractUsage(body: string): ResponseUsage | undefined {
   if (!/"(?:usage|usageMetadata)"/.test(body)) return undefined
-  const output = maxOf(body, ['completion_tokens', 'output_tokens', 'candidatesTokenCount'])
+  // Gemini bills its thinking (thoughtsTokenCount) as output, apart from candidatesTokenCount.
+  const output = maxOf(body, ['completion_tokens', 'output_tokens', 'candidatesTokenCount']) + maxOf(body, ['thoughtsTokenCount'])
   const write5m = maxOf(body, ['ephemeral_5m_input_tokens'])
   const write1h = maxOf(body, ['ephemeral_1h_input_tokens'])
   const ttl = {

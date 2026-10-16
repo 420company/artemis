@@ -11,10 +11,13 @@
  *                 summaries by continuation (the feature barely ran); a
  *                 cost that is unknown or has unpriced calls; or D cheaper
  *                 by >= 10% per completed task but within the paired noise
- *   do not ship   a new 4xx error in D (rate limits, 429, are counted
- *                 apart and do not block), or accuracy worse than the
- *                 non-inferiority margin (d - SE < -margin), or not cheap
- *                 enough for the accuracy it brings
+ *   do not ship   D completed no task while A did; a new 4xx error in D
+ *                 (rate limits, 429, are counted apart and do not block);
+ *                 accuracy worse than the non-inferiority margin
+ *                 (d - SE < -margin) — all checked before the inconclusive
+ *                 conditions on continuations and cost, so a broken D never
+ *                 reads as "unknown"; or not cheap enough for the accuracy
+ *                 it brings
  *   ship          accuracy non-inferior (d - SE >= -margin) and D at least
  *                 10% cheaper per completed task (the paired cost difference
  *                 below zero by more than its SE), or accuracy better
@@ -184,7 +187,7 @@ export function compareArms(a: ArmRuns, d: ArmRuns, options: { margin?: number }
     ...(cost ? { costDiff: cost.mean, costSE: cost.se } : {}),
     ...(costRatio !== undefined ? { costRatio } : {}),
     new4xx, continuations, perTask,
-    verdict: shipRule({ pairs: keys.length, diff, se, margin, costRatio, costDiff: cost?.mean, costSE: cost?.se, new4xx, continuations, unpriced }),
+    verdict: shipRule({ pairs: keys.length, diff, se, margin, costRatio, costDiff: cost?.mean, costSE: cost?.se, new4xx, continuations, unpriced, completedA: sa.passed, completedD: sd.passed }),
   }
 }
 
@@ -200,21 +203,27 @@ export function shipRule(input: {
   new4xx: Record<string, number>
   continuations: number
   unpriced?: number
+  /** Paired runs each arm completed (passed); a D that completes nothing A does is broken, not unknown. */
+  completedA?: number
+  completedD?: number
 }): Verdict {
   const margin = input.margin ?? DEFAULT_MARGIN
   const fresh = Object.values(input.new4xx).reduce((s, x) => s + x, 0)
+  // A broken D is a "no" before anything else is weighed: completion, errors, accuracy.
+  if (input.pairs > 0 && input.completedD === 0 && (input.completedA ?? 0) > 0) {
+    return { outcome: 'no-ship', reason: `D completed no task (A completed ${input.completedA})` }
+  }
   if (input.pairs < 2 || !Number.isFinite(input.se)) return { outcome: 'inconclusive', reason: `not enough paired runs (${input.pairs})` }
   if (fresh > 0) return { outcome: 'no-ship', reason: `${fresh} new 4xx error(s) in D (rate limits not counted)` }
+  if (input.diff - input.se < -margin) return { outcome: 'no-ship', reason: `accuracy worse than the margin (d − SE = ${fmt(input.diff - input.se)} < −${fmt(margin)})` }
   if (input.continuations < MIN_CONTINUATIONS) {
     return { outcome: 'inconclusive', reason: `D wrote only ${input.continuations} summary(ies) by continuation (needs ≥ ${MIN_CONTINUATIONS}): too few compactions during runs, or the summarizer is another model (run D with --d-mode main)` }
   }
   if (input.unpriced) return { outcome: 'inconclusive', reason: `${input.unpriced} call(s) without rates: add them to the rate file` }
   if (input.costRatio === undefined) return { outcome: 'inconclusive', reason: 'cost unknown: run with rates (--prices) so $ per completed task can be compared' }
-  const nonInferior = input.diff - input.se >= -margin
   const better = input.diff > input.se
   const cheaper = 1 - input.costRatio
   const costSignificant = input.costDiff !== undefined && input.costSE !== undefined && Number.isFinite(input.costSE) && input.costDiff + input.costSE < 0
-  if (!nonInferior) return { outcome: 'no-ship', reason: `accuracy worse than the margin (d − SE = ${fmt(input.diff - input.se)} < −${fmt(margin)})` }
   if (better && input.costRatio <= 1.05) return { outcome: 'ship', reason: `accuracy better (d ${fmt(input.diff)} > SE ${fmt(input.se)}) at ${pctOf(-cheaper)} cost per completed task` }
   if (input.costRatio <= 0.9) {
     if (!costSignificant) return { outcome: 'inconclusive', reason: `${pctOf(cheaper)} cheaper per completed task, but the paired cost difference (${money(input.costDiff)} ± ${money(input.costSE)} per run) is within its SE` }

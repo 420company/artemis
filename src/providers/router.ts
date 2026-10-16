@@ -430,6 +430,8 @@ export async function createProviderRouter(
         return ranked;
       };
 
+      // The candidate that answered the latest request through this object.
+      let lastServing: ChatProvider | undefined;
       const tryRankedProviders = async (
         run: (candidate: RoutedProviderCandidate) => Promise<ProviderResponse>,
         requestOptions?: ProviderRequestOptions,
@@ -455,6 +457,7 @@ export async function createProviderRouter(
               );
             }
             const result = await run(candidate);
+            lastServing = candidate.provider;
             if (ranked.length > 1) {
               const telemetry = formatProviderUsageTelemetry(result.usage, {
                 includeProfile: false,
@@ -522,6 +525,9 @@ export async function createProviderRouter(
         // The candidate this target tries first: whose prompt cache a request reads.
         get primaryProvider() {
           return rankForTarget(buildCandidates())[0]?.provider;
+        },
+        get lastServingProvider() {
+          return lastServing;
         },
         // The window of the provider this target tries first.
         get contextLength() {
