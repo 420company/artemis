@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { buildStyleEnhancement, matchStyleDna, routeQuestion } from '../src/tools/visual/styleMatch.js';
-import { STYLE_LIBRARY, STYLE_PRINCIPLES, principleById } from '../src/tools/visual/styleDna.js';
+import { CONDITIONAL_PRINCIPLES, STYLE_LIBRARY, STYLE_PRINCIPLES, principleById, styleById } from '../src/tools/visual/styleDna.js';
 import { runHermeticSaga, videoTaskBodies } from './sagaHermeticHarness.js';
 
 /** The library itself: ids unique, every referenced principle exists, every style usable. */
@@ -13,9 +13,12 @@ function libraryChecks(): void {
     assert.ok(style.motifs.length > 0 && style.camera.length > 0 && style.antiPatterns.length > 0, `${style.id} is missing a field the prompt block needs`);
     for (const id of style.principles) principleById(id);
   }
-  assert.equal(STYLE_PRINCIPLES.length, 24, 'the verification produced 24 transferable principles');
+  assert.equal(STYLE_PRINCIPLES.length, 25, 'the verification produced 24 transferable principles plus P25');
   const principleIds = new Set(STYLE_PRINCIPLES.map((principle) => principle.id));
-  assert.equal(principleIds.size, 24, 'principle ids are unique');
+  assert.equal(principleIds.size, 25, 'principle ids are unique');
+  for (const principle of CONDITIONAL_PRINCIPLES) {
+    assert.ok((principle.triggers?.length ?? 0) >= 3, `${principle.id} is conditional, so it needs a usable cue list`);
+  }
 }
 
 /** Sub-genre matching: "rap MV" is not a style, so each request lands on one. */
@@ -59,6 +62,29 @@ function routeChecks(): void {
   const settled = matchStyleDna({ story: '黏土定格动画 MV，手工感，治愈系，二次元' });
   assert.ok(settled, 'clay request should match');
   assert.equal(settled.openRoutes, undefined, 'a named route settles the question');
+}
+
+/** P25 is a technique: it waits for its own cue instead of riding along. */
+function conditionalPrincipleChecks(): void {
+  const asked = matchStyleDna({ story: '说唱 MV，街头写实，crew 群像，副歌想用穿越机飞进烟花爆炸中心' });
+  assert.ok(asked, 'the request should still match a street style');
+  assert.ok(asked.principles.includes('P25'), 'P25 should apply once the request asks for the reveal');
+  assert.match(buildStyleEnhancement(asked), /FPV drone flying through explosion interior/, 'the prompt keyword should reach the block');
+
+  const plain = matchStyleDna({ story: '说唱 MV，街头写实，滑板，鱼眼，crew 群像' });
+  assert.ok(plain);
+  assert.equal(plain.principles.includes('P25'), false, 'P25 must not ride along uninvited');
+
+  // Native to the festival style: the FPV fly-through is part of its DNA.
+  assert.ok(styleById('mv-edm-festival')?.principles.includes('P25'), 'EDM should carry P25 unconditionally');
+  const edm = matchStyleDna({ story: '电音节现场那种感觉，激光烟雾，万人举手，drop 要炸开' });
+  assert.ok(edm);
+  assert.ok(edm.principles.includes('P25'), 'the festival style applies P25 without a cue');
+
+  // Out of scope: a phone-shot UGC video cannot fly a drone through anything.
+  const ugc = matchStyleDna({ story: '沉浸式护肤，小红书种草，精华质地特写，早C晚A，想要烟花感的奇观' });
+  assert.ok(ugc);
+  assert.equal(ugc.principles.includes('P25'), false, 'P25 is out of scope for UGC');
 }
 
 /** The block carries rules, forbidden elements and the anchors' self-check. */
@@ -111,6 +137,7 @@ async function main(): Promise<void> {
   matchChecks();
   silenceChecks();
   routeChecks();
+  conditionalPrincipleChecks();
   blockChecks();
   await pipelineChecks();
   console.log('saga style enhancement smoke: ok');

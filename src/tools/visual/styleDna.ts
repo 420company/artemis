@@ -24,7 +24,7 @@ export type QualityMark = 'anchor-positive' | 'anchor-negative' | 'verified' | '
 
 export type PrincipleId =
   | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6' | 'P7' | 'P8' | 'P9' | 'P10' | 'P11' | 'P12'
-  | 'P13' | 'P14' | 'P15' | 'P16' | 'P17' | 'P18' | 'P19' | 'P20' | 'P21' | 'P22' | 'P23' | 'P24';
+  | 'P13' | 'P14' | 'P15' | 'P16' | 'P17' | 'P18' | 'P19' | 'P20' | 'P21' | 'P22' | 'P23' | 'P24' | 'P25';
 
 export type Principle = {
   id: PrincipleId;
@@ -36,6 +36,14 @@ export type Principle = {
   scope: StyleCategory[] | 'all';
   /** Lumina video numbers behind it. */
   evidence: string[];
+  /**
+   * A technique rather than a standing rule: it applies only when the request
+   * asks for what it does. Without this gate a principle like P25 would tell
+   * every music video to fly a drone through an explosion, which is the
+   * "硬塞" the library forbids. A style may still list it unconditionally when
+   * the move is native to that style (EDM and its FPV fly-through).
+   */
+  triggers?: string[];
 };
 
 export type StyleDna = {
@@ -145,7 +153,15 @@ export const STYLE_PRINCIPLES: readonly Principle[] = [
   { id: 'P24', scope: ['music-mv', 'explainer'], evidence: ['#12', '#15', '#36', '#48', '#55', '#66'],
     rule: '动画风格先定路数：动画 MV 不是一种风格',
     action: '动画需求必须细化到日系赛璐璐 / 厚涂霓虹 / 酸性实验 / 黏土 / 乐高 / 拼贴之一' },
+  // 七、奇观揭示（条件触发的技法）
+  { id: 'P25', scope: ['music-mv', 'hiphop-mv', 'product-ad', 'explainer'], evidence: ['YouTube Shorts p3tB_YSHG_0'],
+    triggers: ['烟花', '焰火', '爆炸', '爆点', '穿越机', 'fpv', '无人机穿越', '穿进', '飞进', '内部视角', '奇观', '揭示', '真身', '不可能视角', 'through the explosion'],
+    rule: '穿越机穿爆点：用不可能视角揭示物体的 3D 真身。从地面看烟花是扁的 2D 圆，从内部看是立体的火星球，有纵深有体积；穿过爆炸瞬间的整屏白爆天然就是转场点',
+    action: '需要奇观揭示时用 FPV 内部视角（prompt 关键词：FPV drone flying through explosion interior, volumetric 3D）。适用：副歌高潮对鼓点、转场、任何观众以为自己见过但其实没见过真身的物体' },
 ];
+
+/** Principles that wait for their own cue (Principle.triggers). */
+export const CONDITIONAL_PRINCIPLES: readonly Principle[] = STYLE_PRINCIPLES.filter((principle) => (principle.triggers?.length ?? 0) > 0);
 
 /** Positive and negative worked examples, used as the post-generation self-check. */
 export const QUALITY_ANCHORS = {
@@ -298,7 +314,7 @@ const MUSIC_MV: readonly StyleDna[] = [
     camera: ['FPV 无人机穿越人群直扑主舞台', '超广角舞台全景', 'DJ 背后过肩机位', '长焦压缩人群'],
     pacing: 'build-up 随 snare roll 加速（每 4 拍 → 每 1/2 拍），drop 第一拍同时触发喷射、白闪与最大全景',
     antiPatterns: ['乐手弹真实乐器作为主体', '白天平光无烟雾的室内', '安静情绪叙事与长特写', 'drop 处画面不爆发'],
-    principles: ['P5', 'P17', 'P19'], evidence: ['#13'] },
+    principles: ['P5', 'P17', 'P19', 'P25'], evidence: ['#13'] },
   { id: 'mv-rock-band', category: 'music-mv', label: '摇滚乐队演出 MV', quality: 'verified',
     triggers: ['乐队演出', '吉他 solo', '鼓手打鼓', 'live house', '汗水', '嘶吼', 'Nirvana', 'Foo Fighters', 'Linkin Park', '朋克', '车库'],
     motifs: ['全员乐器同框如舞台站位', '鼓槌砸镲片与汗水飞溅', '主唱对麦嘶吼', '观众冲撞与 mosh pit'],
