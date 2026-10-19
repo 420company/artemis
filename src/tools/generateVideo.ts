@@ -26,6 +26,7 @@ import { appendRenderingGuardrails, renderingGuardrailsLength } from './visual/r
 import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
 import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
 import { buildCompactStyleEnhancement, describeStyleMatch, matchStyleDna } from './visual/styleMatch.js';
+import { dropsDressing, promptFidelity } from './visual/rawModeTag.js';
 import { describeVideoGenerationFailure, videoFailureToolError } from './visual/videoGenerationFailure.js';
 import { normalizeVideoDurationForProvider, normalizeVideoResolution } from './visual/videoParams.js';
 import { normalizeVideoRatioArgument } from './visual/aspectRatio.js';
@@ -635,8 +636,11 @@ async function generateVideoWithVisualProvider(
   // generic tasteful imagery. Skip the Director and pass the user's prompt
   // verbatim so the provider can render exactly what was asked for.
   // Saga raw mode asks for the same: the script goes to the model as written.
+  // The same ladder as Saga uses (rawModeTag.ts): the dressing comes off for
+  // cleanDirect and for a provider the owner marked nsfw.
+  const fidelity = promptFidelity({ cleanDirect: action.cleanDirect === true, providerNsfw: videoConfig.nsfw === true });
   const rawMode = action.cleanDirect === true;
-  const bypassDirector = videoConfig.nsfw === true || rawMode;
+  const bypassDirector = dropsDressing(fidelity);
   // A one-line request ("帮我做个说唱 MV 的视频") carries no palette, camera or
   // forbidden list of its own, so the matched style's three locks are added
   // here (styleMatch.ts) and travel into the English rewrite and the

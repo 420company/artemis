@@ -14,7 +14,7 @@ import {
 } from '../utils/visualGenerationConfig.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { executeGenerateVideo, sagaSegmentPromptReserve } from './generateVideo.js';
-import { stripCleanDirectInstruction, stripRawModeTag } from './visual/rawModeTag.js';
+import { dropsDressing, promptFidelity, stripCleanDirectInstruction, stripRawModeTag } from './visual/rawModeTag.js';
 import { normalizeVideoResolution, VIDEO_RESOLUTIONS } from './visual/videoParams.js';
 import {
   describeVideoGenerationFailure,
@@ -1397,11 +1397,18 @@ export async function executeGenerateLongVideo(
       // Side-channel is best-effort; fall through to action.story.
     }
 
-    // Two opt-in modes: raw passthrough ("[原样直传]") sends the script as
-    // written; cleanDirect (guide §9.10) only drops the aesthetic dressing.
-    const rawPassthrough = action.rawPassthrough === true;
-    const cleanDirect = action.cleanDirect === true && !rawPassthrough;
-    const verbatimSegments = rawPassthrough || cleanDirect;
+    // One ladder for how much of Artemis reaches the model (rawModeTag.ts):
+    // raw passthrough sends the script as written, cleanDirect drops the
+    // dressing, and a provider the owner marked nsfw drops it too — the same
+    // setting used to do that on a single clip but not on a Saga segment.
+    const fidelity = promptFidelity({
+      rawPassthrough: action.rawPassthrough === true,
+      cleanDirect: action.cleanDirect === true,
+      providerNsfw: videoNsfw,
+    });
+    const rawPassthrough = fidelity === 'verbatim';
+    const cleanDirect = fidelity === 'undiluted';
+    const verbatimSegments = dropsDressing(fidelity);
     // Divider lines and the 【附录…】 / [Appendix…] recap are for human
     // readers only and never reach a prompt.
     const rawStory = stripBriefNoise(stripCleanDirectInstruction(stripRawModeTag(sanitizeSagaUserText(resolvedSourceStory || action.prompt))));
@@ -1430,7 +1437,10 @@ export async function executeGenerateLongVideo(
       enableLlmRewrite: !verbatimSegments && !briefIsStructured,
       markedDialogueOnly: true,
       subtitleMode: action.subtitleMode ?? 'auto',
-      adultMode: videoNsfw,
+      // The rewrite only stops softening what the owner wrote; it adds
+      // nothing. So it follows what the route can take, rather than asking
+      // anyone to declare it.
+      adultMode: videoNsfw || configured.nsfwCapable === true,
       knownSpeakers: [
         action.narrativeEntities?.protagonist?.name,
         ...(action.narrativeEntities?.supportingCharacters ?? []),
@@ -1572,7 +1582,7 @@ export async function executeGenerateLongVideo(
       // When cleanDirect is on (user explicitly asked for un-wrapped output)
       // OR the video provider is configured NSFW, skip the constitution and
       // let the user's raw prompt flow through every segment unchanged.
-      const skipConstitution = verbatimSegments || videoNsfw;
+      const skipConstitution = verbatimSegments;
       if (!skipConstitution) {
         story = [
           story,
@@ -1634,9 +1644,10 @@ export async function executeGenerateLongVideo(
 
     // CRITICAL: If the user provided an image but Super Visual failed due to safety/privacy,
     // we MUST NOT silently fall back to hallucination. Interrupt and ask for a new image.
-    // When videoNsfw is true the provider accepts real-person inputs directly —
-    // the safety-derivative rejection is not fatal in that case.
-    if (!superVisualMode.enabled && hasGlobalUserImageReferences && !videoNsfw && !explicitUserImageBypass) {
+    // A provider that takes a real person takes these photos directly, so the
+    // identity sheet being refused is not fatal there. Which it is comes from
+    // the route, not from anyone declaring it.
+    if (!superVisualMode.enabled && hasGlobalUserImageReferences && !videoRealPersonAllowed && !explicitUserImageBypass) {
       const isSafetyFail = /privacy|safety|sensitive|blocked|rejected/i.test(superVisualMode.reason ?? '');
       if (isSafetyFail) {
         return {
@@ -1646,10 +1657,9 @@ export async function executeGenerateLongVideo(
         };
       }
     }
-    // When videoNsfw is true and Super Visual refused due to safety, the real-person
-    // photos can still be sent directly — mark that the input IS real-person so the
-    // downstream reference-routing logic can handle it, but do NOT abort.
-    if (videoNsfw && !superVisualMode.enabled && hasGlobalUserImageReferences && !explicitUserImageBypass) {
+    // The sheet was refused but the route takes the person: the photos go
+    // through as they are, and the run says so in the owner's terms.
+    if (videoRealPersonAllowed && !superVisualMode.enabled && hasGlobalUserImageReferences && !explicitUserImageBypass) {
       toolLog(`画面一致性：改用你上传的参考图`);
     }
 
@@ -1690,7 +1700,7 @@ export async function executeGenerateLongVideo(
       // The provider takes the person: nothing was stylised, so there is no
       // illustrated look to undo and the chain frames can be used as they are.
       ? false
-      : videoNsfw && isDirectImageIdentity
+      : videoRealPersonAllowed && isDirectImageIdentity
       ? false   // NSFW provider + direct image → skip real-person safety, pass through
       : superVisualMode.enabled
         ? Boolean((superVisualMode as { inputIsRealPerson?: boolean }).inputIsRealPerson)

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { nsfwCapable, realPersonAllowed } from '../src/utils/visualGenerationConfig.js';
 import { diffSanitize, sanitizeForVideoProvider } from '../src/tools/visual/sagaNarrative.js';
+import { dropsDressing, promptFidelity } from '../src/tools/visual/rawModeTag.js';
 
 /**
  * Two routes for a real person, and which one runs is the provider's policy,
@@ -45,6 +46,27 @@ function nsfwChecks(): void {
   assert.equal(realPersonAllowed({ provider: 'routerai', model: 'dreamina-seedance-2-0-260128' }), true);
 }
 
+/**
+ * One ladder for how much of Artemis reaches the model, used by both the
+ * single-clip path and Saga. The same nsfw setting used to stop the Director
+ * on a clip but not on a segment.
+ */
+function fidelityChecks(): void {
+  assert.equal(promptFidelity({}), 'directed', 'the default keeps the Director');
+  assert.equal(promptFidelity({ cleanDirect: true }), 'undiluted', 'cleanDirect drops the dressing');
+  assert.equal(promptFidelity({ providerNsfw: true }), 'undiluted', 'a provider the owner marked nsfw drops it too');
+  assert.equal(promptFidelity({ rawPassthrough: true }), 'verbatim', 'the tag sends the script as written');
+  // The tag wins: it is the stronger request.
+  assert.equal(promptFidelity({ rawPassthrough: true, cleanDirect: true, providerNsfw: true }), 'verbatim');
+  assert.equal(dropsDressing('directed'), false);
+  assert.equal(dropsDressing('undiluted'), true);
+  assert.equal(dropsDressing('verbatim'), true);
+  // A capable route does NOT drop the dressing on its own: that would change
+  // how every video on it looks, not only an explicit one.
+  assert.equal(nsfwCapable({ provider: 'routerai', model: 'dreamina-seedance-2-0-260128' }), true);
+  assert.equal(promptFidelity({}), 'directed', 'capability alone never undresses a run');
+}
+
 /** The word guard itself: it keeps the meaning, and it is only words. */
 function guardChecks(): void {
   const asked = '真人实拍，真实人物的脸部特写，celebrity lookalike';
@@ -66,6 +88,7 @@ function guardChecks(): void {
 function main(): void {
   policyChecks();
   nsfwChecks();
+  fidelityChecks();
   guardChecks();
   console.log('saga real-person routes smoke: ok');
 }

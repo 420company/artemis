@@ -1546,7 +1546,12 @@ export async function maybeGenerateSuperVisualReference(options: {
     return { enabled: false, reason: ineligible };
   }
   const resolvedImageModel = imageConfigured.model || imageConfigured.config.image.model || 'gpt-image-2';
-  const imageNsfw = imageConfigured.nsfw === true || imageConfigured.config.image.nsfw === true;
+  // Whether the image provider will draw a real person photoreal. Its own
+  // switch when the owner set one, else what the route can take: nobody
+  // should have to declare a provider's policy to it.
+  const imageNsfw = imageConfigured.nsfw === true
+    || imageConfigured.config.image.nsfw === true
+    || imageConfigured.nsfwCapable === true;
 
   // Relay-health short-circuit. The retry inside postOpenAIImageEdit /
   // generateImage already burns ~30s per attempt × 3 attempts × 2 modes ≈
