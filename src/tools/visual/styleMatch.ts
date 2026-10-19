@@ -13,6 +13,7 @@
 
 import {
   CATEGORY_DEFAULTS,
+  CONDITIONAL_PRINCIPLES,
   QUALITY_ANCHORS,
   STYLE_LIBRARY,
   principleById,
@@ -87,7 +88,7 @@ export function matchStyleDna(input: StyleMatchInput): StyleMatch | undefined {
       category: style.category,
       confidence: Math.min(1, score / (style.triggers.length * 0.6)),
       hits,
-      principles: applicablePrinciples(style),
+      principles: applicablePrinciples(style, text),
       ...(openRoutesFor(style, text) ? { openRoutes: openRoutesFor(style, text) } : {}),
     };
     if (!best || better(candidate, best)) best = candidate;
@@ -105,9 +106,21 @@ function better(candidate: StyleMatch, current: StyleMatch): boolean {
   return candidate.style.evidence.length > current.style.evidence.length;
 }
 
-/** Style DNA rules first, then the category's own, deduplicated and ordered. */
-export function applicablePrinciples(style: StyleDna): PrincipleId[] {
+/**
+ * Style DNA rules first, then the category's own, then any technique whose own
+ * cue appears in the request (Principle.triggers): a conditional principle is
+ * a move to reach for when it is asked for, not a standing rule, so without
+ * its cue it stays out of the block.
+ */
+export function applicablePrinciples(style: StyleDna, story = ''): PrincipleId[] {
+  const text = story.toLowerCase();
   const ids = new Set<PrincipleId>([...style.principles, ...CATEGORY_DEFAULTS[style.category]]);
+  for (const principle of CONDITIONAL_PRINCIPLES) {
+    if (ids.has(principle.id)) continue;
+    const inScope = principle.scope === 'all' || principle.scope.includes(style.category);
+    if (!inScope) continue;
+    if ((principle.triggers ?? []).some((trigger) => triggerHit(text, trigger.toLowerCase()))) ids.add(principle.id);
+  }
   return [...ids].sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)));
 }
 
