@@ -64,6 +64,12 @@ export type SagaBibleInput = {
    * model is allowed to render dialogue captions.
    */
   subtitleMode?: 'auto' | 'always' | 'off';
+  /**
+   * Forbidden elements the matched style brings (styleMatch.ts): they join the
+   * NEGATIVE block, which every segment prompt carries. Additive only — the
+   * base entries and the user's own locks stay as they are.
+   */
+  styleNegatives?: string[];
 };
 
 function compactSourceStoryForBible(story: string | undefined): string {
@@ -114,7 +120,7 @@ function extractGlobalContextFromStory(story: string | undefined): string {
 // Build the NEGATIVE block, hardened against the on-screen-text failure mode
 // when the user explicitly said "no subtitles" (and conversely loosened when
 // they want subtitles rendered).
-function buildNegativeBlock(subtitleMode: 'auto' | 'always' | 'off' | undefined): string {
+function buildNegativeBlock(subtitleMode: 'auto' | 'always' | 'off' | undefined, styleNegatives: string[] = []): string {
   const baseEntries = [
     'no identity or wardrobe drift for recurring characters',
     'no accidental jump cuts inside continuous scenes',
@@ -142,7 +148,7 @@ function buildNegativeBlock(subtitleMode: 'auto' | 'always' | 'off' | undefined)
         'no section headers rendered as text',
       ]
       : ['no readable text', 'no subtitles'];
-  return `[NEGATIVE: ${[...baseEntries, ...subtitleEntries].join(', ')}]`;
+  return `[NEGATIVE: ${[...baseEntries, ...subtitleEntries, ...styleNegatives].join(', ')}]`;
 }
 
 // Heuristic: does the brief explicitly request a locked-off / no-motion
@@ -336,7 +342,7 @@ export function buildContinuityBible(input: SagaBibleInput): SagaContinuityBible
     { text: `[LIGHTING: ${clipText(lighting, 120)}]`, dropRank: input.lighting?.trim() ? 4 : 0 },
     cameraIsUserLock ? undefined : { text: `[CAMERA: ${clipText(cameraLanguage, 120)}]`, dropRank: 1 },
     { text: `[MOOD: ${clipText(mood, 100)}]`, dropRank: input.mood?.trim() ? 2 : 0 },
-    { text: buildNegativeBlock(input.subtitleMode) },
+    { text: buildNegativeBlock(input.subtitleMode, uniqueStrings(input.styleNegatives ?? [])) },
   ];
   const identityEntries = identityEntryCandidates.filter((entry): entry is IdentityCardEntry => Boolean(entry));
   const identityCard = fitIdentityCard(identityEntries, IDENTITY_CARD_MAX_CHARS);
