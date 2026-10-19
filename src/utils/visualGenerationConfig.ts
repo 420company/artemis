@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { ProviderStore, isOwnKeyProfile } from '../providers/store.js';
 import type { ProviderProfile, VisualModelConfig } from '../providers/types.js';
 import { DEFAULT_MODEL_IDS } from '../providers/presets.js';
+import { isSeedance25Model, isSeedance2Model } from '../tools/visual/videoCapabilities.js';
 
 export type VisualAssetKind = 'image' | 'video';
 
@@ -13,7 +14,65 @@ export type ConfiguredVisualProvider = {
   source: string;
   /** When true, this provider accepts NSFW/adult content without filtering. */
   nsfw?: boolean;
+  /**
+   * Whether this provider takes a real person as a reference without
+   * refusing it. Two different questions get confused here, so they are kept
+   * apart: adult content (nsfw) and a real human face (this).
+   *
+   * BytePlus's official API filters real people with an image classifier, so
+   * a photo of one has to reach the video model as an illustrated
+   * identity-only sheet (superVisualMode.ts, style 'illustrated'); the
+   * keyframes then pull the look back to photographic. router.ai takes the
+   * person directly, and stylising there would throw away the likeness for
+   * nothing.
+   *
+   * Default: allowed, except for the providers known to filter. Guessing
+   * "allowed" wrongly costs one visible refusal, which the run reports;
+   * guessing "filtered" wrongly turns the owner's real person into a cartoon
+   * and nobody finds out why. The visible failure is the better trade.
+   */
+  realPerson?: boolean;
+  /**
+   * Whether the model would refuse adult content. Not the same as the slot's
+   * `nsfw` flag, which is the owner asking for their words to go through as
+   * written; this only says the route would not reject them.
+   */
+  nsfwCapable?: boolean;
 };
+
+/** Providers whose own filter refuses a real person as a reference. */
+const REAL_PERSON_FILTERED = new Set(['byteplus']);
+
+/**
+ * Whether the model behind this slot would refuse adult content. Three
+ * different questions get confused around the word "nsfw", so they are kept
+ * apart here:
+ *
+ *   nsfwCapable (this) — the provider and model do not refuse it. router.ai's
+ *     Seedance 2.0 Pro does not; BytePlus's official API does.
+ *   realPersonAllowed — the provider does not refuse a real human face.
+ *   the slot's own `nsfw` flag — the owner asking for their words to reach
+ *     the model as written, with the Director's cinematic spec left off. That
+ *     changes how every video on the route looks, so it stays theirs to set
+ *     and is never turned on from a capability.
+ */
+export function nsfwCapable(slot: { provider: string; model?: string; nsfw?: boolean }): boolean {
+  if (slot.nsfw === true) return true;
+  const provider = slot.provider.trim().toLowerCase();
+  if (REAL_PERSON_FILTERED.has(provider)) return false;
+  // router.ai serves Seedance 2.0 (Pro) without the official API's filters.
+  if (provider === 'routerai') return isSeedance2Model(slot.model) || isSeedance25Model(slot.model);
+  return false;
+}
+
+/** Whether this slot takes a real person; nsfw implies it does. */
+export function realPersonAllowed(slot: { provider: string; model?: string; nsfw?: boolean; realPerson?: boolean }): boolean {
+  if (typeof slot.realPerson === 'boolean') return slot.realPerson;
+  if (slot.nsfw === true) return true;
+  // A model that takes adult content certainly takes a face.
+  if (nsfwCapable(slot)) return true;
+  return !REAL_PERSON_FILTERED.has(slot.provider.trim().toLowerCase());
+}
 
 export type VisualFallbackCandidate = ConfiguredVisualProvider & {
   profileId: string;
@@ -330,6 +389,17 @@ export async function resolveConfiguredVisualProvider(
       model: slot.model || defaultVisualModelForProvider(slot.provider, assetKind),
       source,
       nsfw: slot.nsfw === true,
+      realPerson: realPersonAllowed({
+        provider: slot.provider,
+        model: slot.model || defaultVisualModelForProvider(slot.provider, assetKind),
+        nsfw: slot.nsfw === true,
+        ...(typeof (slot as { realPerson?: unknown }).realPerson === 'boolean' ? { realPerson: (slot as { realPerson?: boolean }).realPerson } : {}),
+      }),
+      nsfwCapable: nsfwCapable({
+        provider: slot.provider,
+        model: slot.model || defaultVisualModelForProvider(slot.provider, assetKind),
+        nsfw: slot.nsfw === true,
+      }),
     };
   }
 

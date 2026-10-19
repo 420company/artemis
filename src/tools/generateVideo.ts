@@ -271,7 +271,7 @@ export async function executeGenerateVideo(
       maxPromptChars: directorPromptBudget(action, 'byteplus', model),
       subtitleMode: action.subtitleMode,
     });
-    toolLog('🎞️ 已优化视频提示词。');
+    toolLog('已优化视频提示词。');
 
     const content: Array<Record<string, unknown>> = [
       { type: 'text', text: withSagaRenderingGuardrails(directed.directedPrompt, action, 'byteplus', model) },
@@ -454,7 +454,7 @@ export function sagaSegmentPromptReserve(): number {
 function fitVerbatimPrompt(prompt: string, provider: string, model: string): string {
   const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
   if (prompt.length <= limit) return prompt;
-  toolWarn(`⚠️ 提示词超过视频模型的长度上限（${prompt.length}/${limit}），已截断末尾。`);
+  toolWarn(`提示词超过视频模型的长度上限（${prompt.length}/${limit}），已截断末尾。`);
   return `${prompt.slice(0, limit - 1).trimEnd()}…`;
 }
 
@@ -480,7 +480,7 @@ function withSagaRenderingGuardrails(prompt: string, action: GenerateVideoAction
   const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
   const guarded = appendRenderingGuardrails(prompt, limit);
   if (guarded.added === 0) {
-    toolWarn(`⚠️ 提示词已接近视频模型的长度上限（${prompt.length}/${limit}），本段不追加渲染规则。`);
+    toolWarn(`提示词已接近视频模型的长度上限（${prompt.length}/${limit}），本段不追加渲染规则。`);
   }
   return guarded.prompt;
 }
@@ -492,7 +492,7 @@ function legacyVideoFailure(
   context: ToolExecutionContext,
 ): Pick<ToolExecutionResult, 'output' | 'error'> {
   const failure = describeVideoGenerationFailure({ detail: output, status }, context.locale);
-  toolWarn(`⚠️ ${failure.userMessage}\n   ${failure.details}`);
+  toolWarn(`${failure.userMessage}\n ${failure.details}`);
   return { output: `${output}\nReason: ${failure.userMessage}`, error: videoFailureToolError(failure, status) };
 }
 
@@ -546,7 +546,7 @@ async function tryGenerateWithMainSecondaryFallbackProviders(
   const failures: string[] = [];
   for (const candidate of candidates) {
     try {
-      toolLog(`🧪 测试主/副模型视频生成能力: ${candidate.label}`);
+      toolLog(`测试主/副模型视频生成能力: ${candidate.label}`);
       const provider = await createVisualProvider(candidate.config, 'video');
       if (!provider.supportsVideos || !provider.generateVideo) {
         failures.push(`${candidate.label}: provider does not support videos`);
@@ -582,7 +582,7 @@ async function generateVideoWithVisualProvider(
   const videoConfig = config.video;
   // No provider or model name in user-facing status; the project plan and
   // manifest files record both.
-  toolLog('🎬 开始生成视频。');
+  toolLog('开始生成视频。');
   const capabilityOverrides = model === videoConfig.model ? videoCapabilityOverridesFromConfig(config) : undefined;
   const duration = normalizeVideoDurationForProvider(action.duration, videoConfig.provider, model, capabilityOverrides);
   const capabilities = resolveVideoModelCapabilities(videoConfig.provider, model, capabilityOverrides);
@@ -663,7 +663,7 @@ async function generateVideoWithVisualProvider(
       });
   const generationPrompt = languageNormalized?.generationText ?? action.prompt;
   if (languageNormalized) {
-    toolLog(`🌐 Generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
+    toolLog(`Generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
   }
   const directed = bypassDirector
     ? {
@@ -688,7 +688,7 @@ async function generateVideoWithVisualProvider(
           ? 'always'
           : action.subtitleMode,
       });
-  toolLog('🎞️ 已优化视频提示词。');
+      toolLog('已优化视频提示词。');
   const result = await provider.generateVideo({
     prompt: withSagaRenderingGuardrails(directed.directedPrompt, action, videoConfig.provider, model),
     model,
@@ -719,7 +719,7 @@ async function generateVideoWithVisualProvider(
     );
     // A plain reason for the user; the raw provider error stays in the log
     // line and in the output, where Saga's retry logic reads it.
-    toolWarn(`⚠️ ${failure.userMessage}\n   ${failure.details}`);
+    toolWarn(`${failure.userMessage}\n ${failure.details}`);
     return {
       action,
       ok: false,
