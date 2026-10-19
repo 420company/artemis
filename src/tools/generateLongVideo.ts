@@ -78,6 +78,7 @@ import {
   splitLongShots,
   type ClipShotPart,
 } from './visual/segmentPlan.js';
+import { buildStyleEnhancement, describeStyleMatch, matchStyleDna } from './visual/styleMatch.js';
 import { isBytePlusProvider, videoCapabilityOverridesFromConfig } from './visual/videoCapabilities.js';
 import { videoPollPlan } from './visual/pollSleep.js';
 import type { SagaBriefGlobals } from './visual/sagaBriefGlobals.js';
@@ -1575,6 +1576,19 @@ export async function executeGenerateLongVideo(
       toolLog(`🧠 已自动分析视频“上帝/主角” — ${narrativeEntities.protagonist.name} (${narrativeEntities.protagonist.type}, confidence=${narrativeEntities.protagonist.confidence.toFixed(2)})${skipConstitution ? '。(剧情设定已跳过：cleanDirect / NSFW provider)' : '。'}`);
     }
 
+    // Style enhancement: the Lumina style library (styleDna.ts) matched against
+    // this request, added to the story the way the constitution above is. It is
+    // additive — rules, must-have elements and a forbidden list — and silent
+    // when nothing matches. verbatimSegments (raw passthrough or cleanDirect)
+    // means the user asked for their own words untouched, so nothing is added.
+    const styleMatch = verbatimSegments
+      ? undefined
+      : matchStyleDna({ story, ...(narrativeEntities ? { mode: narrativeEntities.mode } : {}) });
+    if (styleMatch) {
+      story = [story, '', buildStyleEnhancement(styleMatch)].join('\n');
+      toolLog(describeStyleMatch(styleMatch));
+    }
+
     const isPureEnvironment = narrativeEntities?.mode === 'environment';
     const isDirectImageIdentity = identitySource === 'direct_image';
     const explicitUserImageBypass = isDirectImageIdentity || rawPassthrough;
@@ -1857,12 +1871,22 @@ export async function executeGenerateLongVideo(
       wardrobe: action.continuity?.wardrobe,
       props: propAnchors,
       locations: sceneAnchors,
-      palette: action.continuity?.palette?.length ? action.continuity.palette : briefGlobals.palette,
+      // The matched style fills palette and camera only where the user and the
+      // brief said nothing, and its forbidden elements join NEGATIVE. Order of
+      // precedence: the user's own continuity, then the brief, then the style.
+      palette: action.continuity?.palette?.length
+        ? action.continuity.palette
+        : briefGlobals.palette.length > 0
+          ? briefGlobals.palette
+          : styleMatch ? [styleMatch.style.palette] : [],
       lighting: action.continuity?.lighting ?? briefGlobals.lighting,
-      cameraLanguage: action.continuity?.cameraLanguage ?? briefGlobals.cameraLanguage,
+      cameraLanguage: action.continuity?.cameraLanguage
+        ?? briefGlobals.cameraLanguage
+        ?? (styleMatch ? styleMatch.style.camera.slice(0, 2).join('；') : undefined),
       mood: action.continuity?.mood ?? briefGlobals.mood,
       accessoriesLock: accessoriesList,
       subtitleMode: action.subtitleMode,
+      ...(styleMatch ? { styleNegatives: styleMatch.style.antiPatterns } : {}),
     });
 
     const providerSupportsImageRef = limits.referenceInputs.includes('image');
