@@ -25,6 +25,7 @@ import { buildDirectedVideoPrompt } from './visual/videoDirector.js';
 import { appendRenderingGuardrails, renderingGuardrailsLength } from './visual/renderingGuardrails.js';
 import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
 import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
+import { buildCompactStyleEnhancement, describeStyleMatch, matchStyleDna } from './visual/styleMatch.js';
 import { describeVideoGenerationFailure, videoFailureToolError } from './visual/videoGenerationFailure.js';
 import { normalizeVideoDurationForProvider, normalizeVideoResolution } from './visual/videoParams.js';
 import { normalizeVideoRatioArgument } from './visual/aspectRatio.js';
@@ -636,11 +637,23 @@ async function generateVideoWithVisualProvider(
   // Saga raw mode asks for the same: the script goes to the model as written.
   const rawMode = action.cleanDirect === true;
   const bypassDirector = videoConfig.nsfw === true || rawMode;
+  // A one-line request ("帮我做个说唱 MV 的视频") carries no palette, camera or
+  // forbidden list of its own, so the matched style's three locks are added
+  // here (styleMatch.ts) and travel into the English rewrite and the
+  // Director's spec. Only for a plain tool call: a Saga segment already
+  // carries the full enhancement from generateLongVideo (no double
+  // injection), and the bypass cases are deliberate — raw mode and an NSFW
+  // provider are asked for precisely so nothing wraps the user's words.
+  const singleClipStyle = action.sagaSegment === true || bypassDirector
+    ? undefined
+    : matchStyleDna({ story: action.prompt });
+  const singleClipStyleText = singleClipStyle ? buildCompactStyleEnhancement(singleClipStyle) : '';
+  if (singleClipStyle && singleClipStyleText) toolLog(describeStyleMatch(singleClipStyle));
   const languageNormalized = bypassDirector
     ? null
     : await normalizeSagaPromptForVideoGeneration({
         cwd: context.cwd,
-        text: action.prompt,
+        text: singleClipStyleText ? `${action.prompt}\n\n${singleClipStyleText}` : action.prompt,
         // A Saga segment is the user's script plus its locks: the story beat
         // goes verbatim (guide §7.7), so no LLM rewrite.
         enableLlmRewrite: action.sagaSegment !== true,

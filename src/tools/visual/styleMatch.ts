@@ -14,10 +14,13 @@
 import {
   CATEGORY_DEFAULTS,
   CONDITIONAL_PRINCIPLES,
+  MUSIC_STRUCTURE,
   QUALITY_ANCHORS,
+  STRUCTURE_TEMPLATES,
   STYLE_LIBRARY,
   principleById,
   type PrincipleId,
+  type StructureTemplate,
   type StyleCategory,
   type StyleDna,
 } from './styleDna.js';
@@ -147,7 +150,7 @@ function anchorsApply(category: StyleCategory): boolean {
  * instead — see the buildContinuityBible call in generateLongVideo.ts. Short
  * on purpose: it carries rules, not prose.
  */
-export function buildStyleEnhancement(match: StyleMatch): string {
+export function buildStyleEnhancement(match: StyleMatch, options: { structureTemplate?: StructureTemplate } = {}): string {
   const { style } = match;
   const lines: string[] = [
     '═══════════════════════════════════════════════════════════════',
@@ -169,6 +172,16 @@ export function buildStyleEnhancement(match: StyleMatch): string {
     }
   }
 
+  const structure = options.structureTemplate;
+  if (structure) {
+    lines.push(`结构 / Structure (${structure.label}; the user brought none, so use this skeleton):`);
+    for (const beat of structure.beats) {
+      lines.push(`  ${beat.span} ${beat.beat} ｜ ${beat.camera}`);
+    }
+  }
+  const music = musicStructureFor(match);
+  if (music) lines.push(`音乐结构 / Cut points: ${music}`);
+
   if (anchorsApply(match.category)) {
     lines.push(
       `自检 / Self-check, learn from ${QUALITY_ANCHORS.positive.id}: ${QUALITY_ANCHORS.positive.checks.join(' ')}`,
@@ -178,6 +191,44 @@ export function buildStyleEnhancement(match: StyleMatch): string {
 
   lines.push('═══════════════════════════════════════════════════════════════');
   return lines.join('\n');
+}
+
+/**
+ * The beat skeleton for a request that brought none of its own: the style's
+ * preferred template, else the category's. A user who wrote a script, shots
+ * or timecodes keeps them — the caller passes hasOwnStructure for that, and
+ * nothing is suggested (P27).
+ */
+export function pickStructureTemplate(match: StyleMatch, hasOwnStructure: boolean): StructureTemplate | undefined {
+  if (hasOwnStructure) return undefined;
+  const preferred = STRUCTURE_TEMPLATES.find((template) => template.preferredStyles?.includes(match.style.id));
+  if (preferred) return preferred;
+  return STRUCTURE_TEMPLATES.find((template) => template.scope === 'all' || template.scope.includes(match.category));
+}
+
+/** How this style's music sections map to cut points, when it is a music style. */
+export function musicStructureFor(match: StyleMatch): string | undefined {
+  return MUSIC_STRUCTURE[match.style.id];
+}
+
+/**
+ * The short form for a single clip: one shot, a tight prompt budget, so only
+ * the three locks that change the picture travel. Returns '' when nothing
+ * useful fits in the budget.
+ */
+export function buildCompactStyleEnhancement(match: StyleMatch, maxChars = 420): string {
+  const parts = [
+    `风格 Style: ${match.style.label}`,
+    `色调 Palette: ${match.style.palette}`,
+    `运镜 Camera: ${match.style.camera.slice(0, 2).join('；')}`,
+    `禁止 Avoid: ${match.style.antiPatterns.slice(0, 3).join('；')}`,
+  ];
+  let text = parts.join('\n');
+  while (text.length > maxChars && parts.length > 2) {
+    parts.pop();
+    text = parts.join('\n');
+  }
+  return text.length > maxChars ? '' : text;
 }
 
 /** One line for the tool log, so the owner sees what was applied and why. */

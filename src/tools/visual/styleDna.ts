@@ -24,7 +24,8 @@ export type QualityMark = 'anchor-positive' | 'anchor-negative' | 'verified' | '
 
 export type PrincipleId =
   | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6' | 'P7' | 'P8' | 'P9' | 'P10' | 'P11' | 'P12'
-  | 'P13' | 'P14' | 'P15' | 'P16' | 'P17' | 'P18' | 'P19' | 'P20' | 'P21' | 'P22' | 'P23' | 'P24' | 'P25';
+  | 'P13' | 'P14' | 'P15' | 'P16' | 'P17' | 'P18' | 'P19' | 'P20' | 'P21' | 'P22' | 'P23' | 'P24' | 'P25'
+  | 'P26' | 'P27' | 'P28';
 
 export type Principle = {
   id: PrincipleId;
@@ -158,6 +159,18 @@ export const STYLE_PRINCIPLES: readonly Principle[] = [
     triggers: ['烟花', '焰火', '爆炸', '爆点', '穿越机', 'fpv', '无人机穿越', '穿进', '飞进', '内部视角', '奇观', '揭示', '真身', '不可能视角', 'through the explosion'],
     rule: '穿越机穿爆点：用不可能视角揭示物体的 3D 真身。从地面看烟花是扁的 2D 圆，从内部看是立体的火星球，有纵深有体积；穿过爆炸瞬间的整屏白爆天然就是转场点',
     action: '需要奇观揭示时用 FPV 内部视角（prompt 关键词：FPV drone flying through explosion interior, volumetric 3D）。适用：副歌高潮对鼓点、转场、任何观众以为自己见过但其实没见过真身的物体' },
+  // 八、来自导演模式与 VIBES 的三条（App 导演模式面板的硬编码约束，2026-06 做的，
+  // 面板本身没有入口；这里只保留它判断正确的那几条，模板化的导演分析不要）
+  { id: 'P26', scope: 'all', evidence: ['导演模式 MV 载荷', '#68'],
+    triggers: ['多主角', '两个人', '三个人', '三人', '群像', '多角色', '角色卡槽', '双人'],
+    rule: '多主角参考图不得串脸：每个角色绑定自己的参考图，特征不能互换',
+    action: '多角色时提示词里逐个点名角色与其参考图，明确禁止长相、服装、配饰在角色之间漂移；群像仍要 C 位明确' },
+  { id: 'P27', scope: 'all', evidence: ['导演模式 MV 载荷'],
+    rule: '用户写的禁止项是硬约束（禁止误读必须遵守）：他说不要拍成什么，就绝对不能出现',
+    action: '把用户的禁止项原样写进负面提示词，并置于风格 DNA 的建议之上；两者冲突时以用户的为准' },
+  { id: 'P28', scope: ['music-mv', 'hiphop-mv'], evidence: ['VIBES 证据层设计 2026-06-01'],
+    rule: '音频分析是证据层，用户的情绪判决优先于 BPM、调性和能量曲线',
+    action: '有音频数据时用它对齐剪辑点与段落，但情绪、色调和镜头语言仍按用户写的情绪判决走；两者冲突时听用户' },
 ];
 
 /** Principles that wait for their own cue (Principle.triggers). */
@@ -576,6 +589,142 @@ const EXPLAINER: readonly StyleDna[] = [
     antiPatterns: ['省略关键步骤或镜头遮住操作区', '晃动手持与大幅运镜', '步骤间插无关氛围空镜', '背景杂乱抢主体', '配乐淹没操作音'],
     principles: [], evidence: [] },
 ];
+
+/**
+ * Beat skeletons for a request that gives a sentence and no structure of its
+ * own. The four-beat one comes from the App's director-mode panel (hardcoded
+ * there in 2026-06, behind a panel with no entry point); the others are the
+ * distillation's own structure templates with their evidence. Saga uses one
+ * only when the user wrote no script, no shots and no timecodes: a user who
+ * brought a structure keeps it (P27).
+ */
+export type StructureTemplate = {
+  id: string;
+  label: string;
+  /** Which categories it fits; 'all' for the generic four-beat one. */
+  scope: StyleCategory[] | 'all';
+  /** Styles it is the first choice for. */
+  preferredStyles?: string[];
+  /** One line per beat: share of the total length, what happens, how it is shot. */
+  beats: Array<{ span: string; beat: string; camera: string }>;
+  evidence: string[];
+};
+
+export const STRUCTURE_TEMPLATES: readonly StructureTemplate[] = [
+  {
+    id: 'four-beat-mv', label: '四段式 · MV', scope: ['music-mv', 'hiphop-mv'], evidence: ['导演模式面板'],
+    beats: [
+      { span: '0–15%', beat: '开场建立情绪：一个镜头立刻立住世界观', camera: '慢速推进，浅景深，前奏留出空间感' },
+      { span: '15–40%', beat: '音乐人格显影：只围绕指定片段展开，人物状态、城市、身体动作或抽象意象开始同步节奏', camera: '中近景与细节特写交替，避免信息过满' },
+      { span: '40–85%', beat: '高潮记忆点：颜色、动作或情绪形成一次明确撞击', camera: '更强对比光，镜头可从稳定转向轻微漂浮或手持' },
+      { span: '最后 15%', beat: '收束留余味：像片段结束后仍留在身体里的回声，不默认拍完整首歌', camera: '慢慢远离，或停在一个反射、背影、光源上' },
+    ],
+  },
+  {
+    id: 'four-beat-ad', label: '四段式 · 商业广告', scope: ['product-ad'], evidence: ['导演模式面板'],
+    beats: [
+      { span: '0–15%', beat: '开场建立情绪：一个镜头立刻立住世界观', camera: '慢速推进，浅景深，环境声留出空间感' },
+      { span: '15–40%', beat: '产品通过手、光、材质或使用场景出现，不要像普通商品展示', camera: '中近景与细节特写交替，避免信息过满' },
+      { span: '40–85%', beat: '记忆点：产品与人物情绪形成一次明确撞击', camera: '更强对比光，镜头从稳定转向轻微漂浮' },
+      { span: '最后 15%', beat: '产品信息收束但保持情绪，不要突然变成 PPT；有真人出演时这里放点题台词（P11）', camera: '慢慢远离，或停在一个反射、背影、光源上' },
+    ],
+  },
+  {
+    id: 'beauty-three-act', label: '大牌商拍三段式', scope: ['product-ad'], preferredStyles: ['ad-cosmetics', 'ad-luxury-product'], evidence: ['#3'],
+    beats: [
+      { span: '0–40%', beat: '极端产品微距：多角度、多位置、内外兼顾', camera: 'macro 加慢动作，120fps 以上拍质地' },
+      { span: '40–75%', beat: '人物肩上近景，传达品质感与冷静；全程无对白，只有产品 ASMR 与 BGM', camera: '85–135mm 长焦压缩，浅景深' },
+      { span: '最后 25%', beat: '产品回归主角：完整特写加推镜，一句点题落在产品主张上', camera: '缓慢推镜收尾' },
+    ],
+  },
+  {
+    id: 'ugc-seven-scene', label: 'UGC 种草七场景', scope: ['ugc-commerce'], evidence: ['#18'],
+    beats: [
+      { span: '0–5%', beat: '钩子：最解压或最惊艳的那一下', camera: '质地微距或产品特写' },
+      { span: '5–20%', beat: '展示：产品与场景全貌，配一句字幕说清是什么', camera: '台面 45° 俯拍' },
+      { span: '20–70%', beat: '使用演示：每一步 3–6 秒，现场收音为主', camera: '近景与手部特写轮换' },
+      { span: '70–90%', beat: '效果呈现：前后对比或成品状态', camera: '同机位对比' },
+      { span: '最后 10%', beat: 'CTA：举起产品贴近镜头', camera: '手持近景' },
+    ],
+  },
+  {
+    id: 'concept-three-act', label: '概念 MV 三幕', scope: ['music-mv'], preferredStyles: ['mv-surreal-fashion'], evidence: ['#38'],
+    beats: [
+      { span: '0–30%', beat: '降临与现身：主体进入世界', camera: '仰拍神性构图，缓推' },
+      { span: '30–70%', beat: '对峙与变形：机甲、液态金属或身份转换', camera: '环绕与推拉交替' },
+      { span: '最后 30%', beat: '神性回响：收束于仪式感定格，结尾留一句定调', camera: '定格或极慢推' },
+    ],
+  },
+  {
+    id: 'explainer-six-scene', label: '科普六场景', scope: ['explainer'], evidence: ['#59'],
+    beats: [
+      { span: '0–10%', beat: '反直觉问题开场', camera: '主角或图形入画' },
+      { span: '10–30%', beat: '定义问题，画出核心概念', camera: '全景图解' },
+      { span: '30–80%', beat: '三到四个逻辑步骤，每步先画后讲，每 4–6 秒更新视觉', camera: '局部放大与平移' },
+      { span: '80–95%', beat: '回扣开头的问题', camera: '拉远看全图' },
+      { span: '最后 5%', beat: '行动号召或延伸思考', camera: '定格' },
+    ],
+  },
+];
+
+/**
+ * How a music style's sections map to cut points. The VIBES audio analyser
+ * (install_audio_emotion / analyze_audio / analyze_audio_emotion) was
+ * designed to fill the numbers here — BPM, energy curve, peaks, section
+ * boundaries — but those tools were never written, in this engine or in the
+ * CLI. Until they are, the mapping below is what Saga uses, and the user's
+ * own emotional verdict outranks any of it (P28).
+ */
+export const MUSIC_STRUCTURE: Readonly<Record<string, string>> = {
+  'mv-kpop-choreo': '主歌用个人特写与场景叙事，预副歌快切升格，副歌全员正面编舞，桥段慢镜情绪特写，dance break 用一镜到底的完整舞段',
+  'mv-edm-festival': 'intro 与 breakdown 用 3–6 秒长镜，build-up 随 snare roll 从每 4 拍加速到每 1/2 拍，drop 第一拍同时爆发，drop 段每镜 0.3–0.7 秒',
+  'mv-rock-band': '按乐器轮流点名：riff 切吉他、鼓 fill 切鼓手、人声切主唱；主歌每镜 2–3 秒，副歌 0.5–1 秒，solo 停在吉他手身上 3–8 秒',
+  'mv-nocturnal-rnb': '不卡每一拍，切点落在小节线或乐句开头，跟人声与合成器铺底而不是跟鼓，每镜 3–6 秒，转折处硬切黑场',
+  'mv-latin-reggaeton': '跟 dembow 律动，在 boom 上切镜、在 chick 上做小幅推拉，每镜 1–2 秒，副歌多机位快切加群舞',
+  'mv-mandopop-ballad': '跟歌词与情绪而不是鼓点：唱到雨就出现雨，主歌铺陈故事，副歌推向情绪高点，桥段到最后一次副歌是剧情转折',
+  'mv-hyperpop-glitch': '与音乐的故障同步：变调、切片、失真处画面要有对应的撕裂、卡帧或倒放；极乱之后突然切静',
+  'mv-indie-lofi': '不卡点，剪辑点与节拍松散对应甚至故意错开，单镜 5–15 秒，情绪平直无高潮爆发',
+  'hh-trap': '130–160 BPM，hi-hat roll 加速时闪切，adlib 触发即时切，节拍 drop 时镜头震动或 speed ramp',
+  'hh-drill': '140 BPM 左右，切在 kick 与 bass slide 上，段落内长镜积累压迫，副歌群体 walk 时快速切',
+  'hh-east-coast': '跟 85–95 BPM 的 boom bap，在 snare 上切，每镜 2–4 秒，段落间慢叠化或黑场',
+};
+
+/**
+ * The wording the professional path asks with. Taken from the director-mode
+ * panel's field prompts, which were better written than anything generated
+ * from scratch: the emotional verdict outranks the analysis (P28), and the
+ * exclusions are hard constraints (P27).
+ */
+export const ELICITATION: Readonly<Record<string, { question: string; hint: string }>> = {
+  emotionalVerdict: {
+    question: '这段作品真正是什么情绪？',
+    hint: '孤独、冷、刺骨、失眠、空洞、厚重、痛之入骨、狂喜、性感、虚无……这一项优先级最高，会压过音频分析和风格建议',
+  },
+  exclusions: {
+    question: '有什么绝对不要出现的？',
+    hint: '地点、颜色、季节、材质，以及不要拍成什么。写下来就是硬约束，不会被风格建议盖掉',
+  },
+  protagonistRelation: {
+    question: '主角关系是什么？',
+    hint: '一个人、两个人、缺席的人、幻觉、自我分裂、非真人角色……多角色时每个角色要绑自己的参考图',
+  },
+  songSegment: {
+    question: '只拍哪一段？',
+    hint: '起止时间或段落名，例如 00:42-01:18、副歌第一遍。不指定就只按总时长走，不默认拍完整首歌',
+  },
+  commercialGoal: {
+    question: '商业目标或品牌感觉？',
+    hint: '高级、可信、性感、效率、治愈、反叛、奢侈……这决定镜头为转化服务还是为情绪服务',
+  },
+  audience: {
+    question: '目标人群是谁？',
+    hint: '他们想要什么、害怕什么。商业广告缺了这一项就会拍成空泛 MV',
+  },
+};
+
+export function structureTemplateById(id: string): StructureTemplate | undefined {
+  return STRUCTURE_TEMPLATES.find((template) => template.id === id);
+}
 
 /** Every style the library knows, in match order (verified anchors first). */
 export const STYLE_LIBRARY: readonly StyleDna[] = [...HIPHOP, ...MUSIC_MV, ...PRODUCT_AD, ...UGC, ...EXPLAINER];

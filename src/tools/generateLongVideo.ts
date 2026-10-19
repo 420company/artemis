@@ -78,7 +78,7 @@ import {
   splitLongShots,
   type ClipShotPart,
 } from './visual/segmentPlan.js';
-import { buildStyleEnhancement, describeStyleMatch, matchStyleDna } from './visual/styleMatch.js';
+import { buildStyleEnhancement, describeStyleMatch, matchStyleDna, pickStructureTemplate } from './visual/styleMatch.js';
 import { isBytePlusProvider, videoCapabilityOverridesFromConfig } from './visual/videoCapabilities.js';
 import { videoPollPlan } from './visual/pollSleep.js';
 import type { SagaBriefGlobals } from './visual/sagaBriefGlobals.js';
@@ -1585,8 +1585,15 @@ export async function executeGenerateLongVideo(
       ? undefined
       : matchStyleDna({ story, ...(narrativeEntities ? { mode: narrativeEntities.mode } : {}) });
     if (styleMatch) {
-      story = [story, '', buildStyleEnhancement(styleMatch)].join('\n');
-      toolLog(describeStyleMatch(styleMatch));
+      // A user who wrote a script, shots or timecodes keeps their own
+      // structure; only a request that brought none gets a skeleton (P27).
+      const hasOwnStructure = action.preserveUserScript === true
+        || (action.shots?.length ?? 0) > 0
+        || storyboardImagePaths.length > 0
+        || nonEmptyStringArray(action.storyboardImageUrls).length > 0;
+      const structureTemplate = pickStructureTemplate(styleMatch, hasOwnStructure);
+      story = [story, '', buildStyleEnhancement(styleMatch, structureTemplate ? { structureTemplate } : {})].join('\n');
+      toolLog(`${describeStyleMatch(styleMatch)}${structureTemplate ? `；结构 ${structureTemplate.label}` : ''}`);
     }
 
     const isPureEnvironment = narrativeEntities?.mode === 'environment';
