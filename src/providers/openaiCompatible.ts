@@ -318,7 +318,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  *     → MUST FORCE reasoning_content (with empty fallback) on every assistant
  *     message including those without original reasoning.
  *
- *   - Xiaomi MiMo (mimo-v2.5-pro etc.):
+ *   - Xiaomi MiMo (mimo-v2.6-pro etc.):
  *     Same requirement as DeepSeek-V4 — thinking mode demands reasoning_content
  *     round-trip or returns 400.
  *
