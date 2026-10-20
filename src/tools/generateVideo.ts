@@ -25,6 +25,8 @@ import { buildDirectedVideoPrompt } from './visual/videoDirector.js';
 import { appendRenderingGuardrails, renderingGuardrailsLength } from './visual/renderingGuardrails.js';
 import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
 import { normalizeSagaPromptForVideoGeneration } from './visual/sagaLanguageDirector.js';
+import { buildCompactStyleEnhancement, describeStyleMatch, matchStyleDna } from './visual/styleMatch.js';
+import { dropsDressing, promptFidelity } from './visual/rawModeTag.js';
 import { describeVideoGenerationFailure, videoFailureToolError } from './visual/videoGenerationFailure.js';
 import { normalizeVideoDurationForProvider, normalizeVideoResolution } from './visual/videoParams.js';
 import { normalizeVideoRatioArgument } from './visual/aspectRatio.js';
@@ -270,7 +272,7 @@ export async function executeGenerateVideo(
       maxPromptChars: directorPromptBudget(action, 'byteplus', model),
       subtitleMode: action.subtitleMode,
     });
-    toolLog('🎞️ 已优化视频提示词。');
+    toolLog('已优化视频提示词。');
 
     const content: Array<Record<string, unknown>> = [
       { type: 'text', text: withSagaRenderingGuardrails(directed.directedPrompt, action, 'byteplus', model) },
@@ -453,7 +455,7 @@ export function sagaSegmentPromptReserve(): number {
 function fitVerbatimPrompt(prompt: string, provider: string, model: string): string {
   const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
   if (prompt.length <= limit) return prompt;
-  toolWarn(`⚠️ 提示词超过视频模型的长度上限（${prompt.length}/${limit}），已截断末尾。`);
+  toolWarn(`提示词超过视频模型的长度上限（${prompt.length}/${limit}），已截断末尾。`);
   return `${prompt.slice(0, limit - 1).trimEnd()}…`;
 }
 
@@ -479,7 +481,7 @@ function withSagaRenderingGuardrails(prompt: string, action: GenerateVideoAction
   const limit = resolveVideoModelLimits(provider, model).maxPromptChars;
   const guarded = appendRenderingGuardrails(prompt, limit);
   if (guarded.added === 0) {
-    toolWarn(`⚠️ 提示词已接近视频模型的长度上限（${prompt.length}/${limit}），本段不追加渲染规则。`);
+    toolWarn(`提示词已接近视频模型的长度上限（${prompt.length}/${limit}），本段不追加渲染规则。`);
   }
   return guarded.prompt;
 }
@@ -491,7 +493,7 @@ function legacyVideoFailure(
   context: ToolExecutionContext,
 ): Pick<ToolExecutionResult, 'output' | 'error'> {
   const failure = describeVideoGenerationFailure({ detail: output, status }, context.locale);
-  toolWarn(`⚠️ ${failure.userMessage}\n   ${failure.details}`);
+  toolWarn(`${failure.userMessage}\n ${failure.details}`);
   return { output: `${output}\nReason: ${failure.userMessage}`, error: videoFailureToolError(failure, status) };
 }
 
@@ -545,7 +547,7 @@ async function tryGenerateWithMainSecondaryFallbackProviders(
   const failures: string[] = [];
   for (const candidate of candidates) {
     try {
-      toolLog(`🧪 测试主/副模型视频生成能力: ${candidate.label}`);
+      toolLog(`测试主/副模型视频生成能力: ${candidate.label}`);
       const provider = await createVisualProvider(candidate.config, 'video');
       if (!provider.supportsVideos || !provider.generateVideo) {
         failures.push(`${candidate.label}: provider does not support videos`);
@@ -581,7 +583,7 @@ async function generateVideoWithVisualProvider(
   const videoConfig = config.video;
   // No provider or model name in user-facing status; the project plan and
   // manifest files record both.
-  toolLog('🎬 开始生成视频。');
+  toolLog('开始生成视频。');
   const capabilityOverrides = model === videoConfig.model ? videoCapabilityOverridesFromConfig(config) : undefined;
   const duration = normalizeVideoDurationForProvider(action.duration, videoConfig.provider, model, capabilityOverrides);
   const capabilities = resolveVideoModelCapabilities(videoConfig.provider, model, capabilityOverrides);
@@ -634,13 +636,28 @@ async function generateVideoWithVisualProvider(
   // generic tasteful imagery. Skip the Director and pass the user's prompt
   // verbatim so the provider can render exactly what was asked for.
   // Saga raw mode asks for the same: the script goes to the model as written.
+  // The same ladder as Saga uses (rawModeTag.ts): the dressing comes off for
+  // cleanDirect and for a provider the owner marked nsfw.
+  const fidelity = promptFidelity({ cleanDirect: action.cleanDirect === true, providerNsfw: videoConfig.nsfw === true });
   const rawMode = action.cleanDirect === true;
-  const bypassDirector = videoConfig.nsfw === true || rawMode;
+  const bypassDirector = dropsDressing(fidelity);
+  // A one-line request ("帮我做个说唱 MV 的视频") carries no palette, camera or
+  // forbidden list of its own, so the matched style's three locks are added
+  // here (styleMatch.ts) and travel into the English rewrite and the
+  // Director's spec. Only for a plain tool call: a Saga segment already
+  // carries the full enhancement from generateLongVideo (no double
+  // injection), and the bypass cases are deliberate — raw mode and an NSFW
+  // provider are asked for precisely so nothing wraps the user's words.
+  const singleClipStyle = action.sagaSegment === true || bypassDirector
+    ? undefined
+    : matchStyleDna({ story: action.prompt });
+  const singleClipStyleText = singleClipStyle ? buildCompactStyleEnhancement(singleClipStyle) : '';
+  if (singleClipStyle && singleClipStyleText) toolLog(describeStyleMatch(singleClipStyle));
   const languageNormalized = bypassDirector
     ? null
     : await normalizeSagaPromptForVideoGeneration({
         cwd: context.cwd,
-        text: action.prompt,
+        text: singleClipStyleText ? `${action.prompt}\n\n${singleClipStyleText}` : action.prompt,
         // A Saga segment is the user's script plus its locks: the story beat
         // goes verbatim (guide §7.7), so no LLM rewrite.
         enableLlmRewrite: action.sagaSegment !== true,
@@ -650,7 +667,7 @@ async function generateVideoWithVisualProvider(
       });
   const generationPrompt = languageNormalized?.generationText ?? action.prompt;
   if (languageNormalized) {
-    toolLog(`🌐 Generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
+    toolLog(`Generation prompt normalized to English${languageNormalized.usedLlmRewrite ? ' via LLM rewrite' : ' via deterministic template'}; dialogue lines=${languageNormalized.dialogueLines.length}.`);
   }
   const directed = bypassDirector
     ? {
@@ -675,7 +692,7 @@ async function generateVideoWithVisualProvider(
           ? 'always'
           : action.subtitleMode,
       });
-  toolLog('🎞️ 已优化视频提示词。');
+      toolLog('已优化视频提示词。');
   const result = await provider.generateVideo({
     prompt: withSagaRenderingGuardrails(directed.directedPrompt, action, videoConfig.provider, model),
     model,
@@ -706,7 +723,7 @@ async function generateVideoWithVisualProvider(
     );
     // A plain reason for the user; the raw provider error stays in the log
     // line and in the output, where Saga's retry logic reads it.
-    toolWarn(`⚠️ ${failure.userMessage}\n   ${failure.details}`);
+    toolWarn(`${failure.userMessage}\n ${failure.details}`);
     return {
       action,
       ok: false,

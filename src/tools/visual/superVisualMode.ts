@@ -39,7 +39,7 @@ let relaySickUntil = 0;
 function isRelaySick(): boolean { return Date.now() < relaySickUntil; }
 function markRelaySick(reason: string): void {
   relaySickUntil = Date.now() + RELAY_SICK_COOLDOWN_MS;
-  toolWarn(`⚠️ 画面一致性：标记 image relay 为 sick（10 分钟内跳过三视图生成）— 原因: ${reason.slice(0, 160)}`);
+  toolWarn(`画面一致性：标记 image relay 为 sick（10 分钟内跳过三视图生成）— 原因: ${reason.slice(0, 160)}`);
 }
 import type { VideoModelLimits } from './videoModelLimits.js';
 import type { VideoReferenceKind } from './videoCapabilities.js';
@@ -729,10 +729,10 @@ async function maybeCompressForUpload(filePath: string, plan: UploadCompressionP
     ], { timeout: 60_000 });
     const fs = await import('node:fs/promises');
     const newStat = await fs.stat(compressedPath);
-    toolLog(`🗜️  画面一致性：上传图片压缩 ${path.basename(filePath)} (${sizeMb.toFixed(1)}MB → ${(newStat.size / (1024 * 1024)).toFixed(2)}MB) — 当前批次 ${plan.inputCount} 张 / ${(plan.totalInputBytes / (1024 * 1024)).toFixed(1)}MB。`);
+    toolLog(`画面一致性：上传图片压缩 ${path.basename(filePath)} (${sizeMb.toFixed(1)}MB → ${(newStat.size / (1024 * 1024)).toFixed(2)}MB) — 当前批次 ${plan.inputCount} 张 / ${(plan.totalInputBytes / (1024 * 1024)).toFixed(1)}MB。`);
     return compressedPath;
   } catch (error) {
-    toolWarn(`⚠️ 画面一致性：图片压缩失败（${error instanceof Error ? error.message.slice(0, 160) : String(error)}），使用原图。`);
+    toolWarn(`画面一致性：图片压缩失败（${error instanceof Error ? error.message.slice(0, 160) : String(error)}），使用原图。`);
     return filePath;
   }
 }
@@ -1227,7 +1227,7 @@ async function describeUserImageWithGeminiVision(options: {
     });
     const raw = await res.text();
     if (!res.ok) {
-      toolWarn(`⚠️ 画面一致性：图片识别失败（HTTP ${res.status}）— ${raw.slice(0, 200)}`);
+      toolWarn(`画面一致性：图片识别失败（HTTP ${res.status}）— ${raw.slice(0, 200)}`);
       return null;
     }
     type GeminiPart = { text?: unknown };
@@ -1235,7 +1235,7 @@ async function describeUserImageWithGeminiVision(options: {
     const text = parsed.candidates?.[0]?.content?.parts?.map((part) => typeof part.text === 'string' ? part.text : '').join(' ').replace(/\s+/g, ' ').trim();
     return text || null;
   } catch (err) {
-    toolWarn(`⚠️ 画面一致性：图片识别网络/解析异常 — ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
+    toolWarn(`画面一致性：图片识别网络/解析异常 — ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
     return null;
   }
 }
@@ -1364,7 +1364,7 @@ export async function describeUserImageWithVision(options: {
       }
       if (!res.ok) {
         const errBody = res.text;
-        toolWarn(`⚠️ 画面一致性：图片识别失败（HTTP ${res.status}，尝试 ${attempt + 1}/${maxAttempts}）— ${errBody.slice(0, 200)}`);
+        toolWarn(`画面一致性：图片识别失败（HTTP ${res.status}，尝试 ${attempt + 1}/${maxAttempts}）— ${errBody.slice(0, 200)}`);
         // 404 / 400 with model-not-found / 503 from a model-missing relay
         // means THIS model isn't served — try the next fallback in the chain.
         const looksLikeModelMissing = res.status === 404
@@ -1372,7 +1372,7 @@ export async function describeUserImageWithVision(options: {
           || (res.status === 503 && visionFallbacks.length > 0)
         if (looksLikeModelMissing && visionFallbacks.length > 0) {
           const nextModel = visionFallbacks.shift()!;
-          toolWarn('⚠️ 画面一致性：换用另一个图片识别模型重试。');
+          toolWarn('画面一致性：换用另一个图片识别模型重试。');
           chatModel = nextModel;
           continue;  // retry immediately with new model, same attempt counter
         }
@@ -1385,22 +1385,22 @@ export async function describeUserImageWithVision(options: {
       const text = res.text;
       let parsed: { choices?: Array<{ message?: { content?: unknown } }> };
       try { parsed = JSON.parse(text); } catch {
-        toolWarn(`⚠️ 画面一致性：vision-describe 响应 JSON 解析失败（尝试 ${attempt + 1}/${maxAttempts}）`);
+        toolWarn(`画面一致性：vision-describe 响应 JSON 解析失败（尝试 ${attempt + 1}/${maxAttempts}）`);
         return null;
       }
       const content = parsed?.choices?.[0]?.message?.content;
       if (typeof content !== 'string') {
-        toolWarn(`⚠️ 画面一致性：vision-describe 返回空内容（尝试 ${attempt + 1}/${maxAttempts}）`);
+        toolWarn(`画面一致性：vision-describe 返回空内容（尝试 ${attempt + 1}/${maxAttempts}）`);
         return null;
       }
       const trimmed = content.replace(/\s+/g, ' ').trim();
       if (trimmed.length === 0) {
-        toolWarn(`⚠️ 画面一致性：vision-describe 返回空白描述（尝试 ${attempt + 1}/${maxAttempts}）`);
+        toolWarn(`画面一致性：vision-describe 返回空白描述（尝试 ${attempt + 1}/${maxAttempts}）`);
         return null;
       }
       return trimmed;
     } catch (err) {
-      toolWarn(`⚠️ 画面一致性：vision-describe 网络异常（尝试 ${attempt + 1}/${maxAttempts}）— ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
+      toolWarn(`画面一致性：vision-describe 网络异常（尝试 ${attempt + 1}/${maxAttempts}）— ${err instanceof Error ? err.message.slice(0, 200) : String(err)}`);
       if (attempt < maxAttempts - 1) {
         await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
         continue;
@@ -1422,6 +1422,14 @@ export async function maybeGenerateSuperVisualReference(options: {
   ratio: string;
   videoLimits: VideoModelLimits;
   imageBudget?: SuperVisualImageBudget;
+  /**
+   * Whether the video provider takes a real person as a reference. When it
+   * does (router.ai), the illustrated identity sheet is not needed and would
+   * only throw the likeness away; when it does not (BytePlus's official API,
+   * whose filter is an image classifier), the sheet is what gets the person
+   * past it, and the keyframes pull the look back to photographic.
+   */
+  videoRealPersonAllowed?: boolean;
 }): Promise<SuperVisualModeResult> {
   if (options.action.superVisualMode === 'off') {
     return { enabled: false, reason: 'disabled by request' };
@@ -1504,7 +1512,7 @@ export async function maybeGenerateSuperVisualReference(options: {
       ].join('\n'),
       'utf8',
     );
-    toolLog(`✅ 画面一致性：已使用用户提供的三视图作为角色身份锚 → ${referenceImagePath}${photorealOutputRequested ? '（写实输出路径）' : ''}`);
+    toolLog(`画面一致性：已使用用户提供的三视图作为角色身份锚 → ${referenceImagePath}${photorealOutputRequested ? '（写实输出路径）' : ''}`);
     return {
       enabled: true,
       provider: 'provided-reference',
@@ -1538,7 +1546,12 @@ export async function maybeGenerateSuperVisualReference(options: {
     return { enabled: false, reason: ineligible };
   }
   const resolvedImageModel = imageConfigured.model || imageConfigured.config.image.model || 'gpt-image-2';
-  const imageNsfw = imageConfigured.nsfw === true || imageConfigured.config.image.nsfw === true;
+  // Whether the image provider will draw a real person photoreal. Its own
+  // switch when the owner set one, else what the route can take: nobody
+  // should have to declare a provider's policy to it.
+  const imageNsfw = imageConfigured.nsfw === true
+    || imageConfigured.config.image.nsfw === true
+    || imageConfigured.nsfwCapable === true;
 
   // Relay-health short-circuit. The retry inside postOpenAIImageEdit /
   // generateImage already burns ~30s per attempt × 3 attempts × 2 modes ≈
@@ -1551,7 +1564,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     };
   }
 
-  toolLog(`🎨 画面一致性：正在生成角色三视图（含身份锁）...`);
+  toolLog(`画面一致性：正在生成角色三视图（含身份锁）...`);
 
   // Vision-derived character description from the FIRST user image. This
   // gives the textual side a grounded ground-truth so identity survives
@@ -1581,7 +1594,11 @@ export async function maybeGenerateSuperVisualReference(options: {
   // When the image provider is nsfw-capable, real-person input does NOT need
   // the illustrated safety-derivative bypass — treat it the same as non-real
   // so the prompt and style selection allow photoreal output.
-  const inputLooksRealPerson = imageNsfw
+  // The bypass exists for one reason: the video provider's own filter. With a
+  // provider that takes the person (or an image provider that will draw them
+  // photoreal), there is nothing to get past, so the likeness is kept.
+  const videoTakesRealPerson = options.videoRealPersonAllowed === true;
+  const inputLooksRealPerson = imageNsfw || videoTakesRealPerson
     ? false
     : (useEditMode && !visionDescription ? true : visionRealHit);
   const userStyle = (options.action as { superVisualStyle?: 'illustrated' | 'photoreal' | 'auto' }).superVisualStyle;
@@ -1599,11 +1616,14 @@ export async function maybeGenerateSuperVisualReference(options: {
   if (useEditMode) {
     const effectiveStyle = userStyle === 'photoreal' ? 'photoreal'
       : userStyle === 'illustrated' ? 'illustrated'
-      : imageNsfw && visionRealHit ? (userStyle === 'auto' ? 'photoreal' : userStyle ?? 'photoreal')
+      : (imageNsfw || videoTakesRealPerson) && visionRealHit ? (userStyle === 'auto' ? 'photoreal' : userStyle ?? 'photoreal')
       : visionDescription
         ? (visionRealHit ? 'illustrated' : 'photoreal')
         : 'illustrated';
-    toolLog(`🎨 画面一致性：角色三视图风格 = ${effectiveStyle}${imageNsfw ? '（NSFW provider，允许写实）' : ''}`);
+    // Nothing about the route or its filters reaches the owner's screen: the
+    // style is all they need to see, and a line about a workaround would only
+    // put the provider's limits in front of them.
+    toolLog(`画面一致性：角色三视图风格 = ${effectiveStyle}`);
   }
   await writeFile(promptPath, prompt, 'utf8');
 
@@ -1625,7 +1645,7 @@ export async function maybeGenerateSuperVisualReference(options: {
       options.imageBudget?.record();
       const referenceImagePath = imageReferenceArtifactPath(options.projectDir, '.png');
       await writeFile(referenceImagePath, edit.buffer);
-      toolLog(`✅ 画面一致性：角色三视图就绪（image-to-image，基于 ${userInputs.length} 张用户图）→ ${referenceImagePath}`);
+      toolLog(`画面一致性：角色三视图就绪（image-to-image，基于 ${userInputs.length} 张用户图）→ ${referenceImagePath}`);
       return {
         enabled: true,
         provider: describeVisualProvider(imageConfigured.config, 'image'),
@@ -1652,11 +1672,11 @@ export async function maybeGenerateSuperVisualReference(options: {
     //      Generating an unrelated character turnaround would mislead
     //      downstream — better to fail clean and let the SV-disabled
     //      fallback in generateLongVideo handle it.
-    toolWarn(`⚠️ 画面一致性：image-to-image 失败（${edit.error.slice(0, 200)}）。`);
+    toolWarn(`画面一致性：image-to-image 失败（${edit.error.slice(0, 200)}）。`);
     if (!visionDescription) {
       const errorText = `image-to-image failed and no vision description available; refusing to fabricate an unrelated turnaround. Detail: ${edit.error.slice(0, 200)}`;
       if (/HTTP 5\d\d|upstream_error|rate.?limit|429|timeout|timed out|aborted/i.test(edit.error)) markRelaySick(edit.error);
-      toolWarn(`⚠️ 画面一致性：没有 vision-describe 兜底，跳过 text-to-image fallback（避免生成与原图无关的角色）。`);
+      toolWarn(`画面一致性：没有 vision-describe 兜底，跳过 text-to-image fallback（避免生成与原图无关的角色）。`);
       return {
         enabled: false,
         reason: errorText,
@@ -1664,7 +1684,7 @@ export async function maybeGenerateSuperVisualReference(options: {
         resolvedUserImagePaths: userInputs.length > 0 ? userInputs : undefined,
       };
     }
-    toolLog(`🛟 画面一致性：用 vision-describe 文字身份重建 text-to-image prompt 后回退。`);
+    toolLog(`画面一致性：用 vision-describe 文字身份重建 text-to-image prompt 后回退。`);
   }
 
   // Mode B: text-to-image via the existing provider helper.
@@ -1704,7 +1724,7 @@ export async function maybeGenerateSuperVisualReference(options: {
     if (/HTTP 5\d\d|upstream_error|rate.?limit|429/i.test(errorText)) {
       markRelaySick(errorText);
     }
-    toolWarn(`⚠️ 画面一致性：角色三视图生成失败 — ${errorText}。将改用用户原图作为身份锚。`);
+    toolWarn(`画面一致性：角色三视图生成失败 — ${errorText}。将改用用户原图作为身份锚。`);
     return {
       enabled: false,
       reason: `the character reference sheet could not be made (${errorText})`,
@@ -1715,7 +1735,7 @@ export async function maybeGenerateSuperVisualReference(options: {
   options.imageBudget?.record();
   const referenceImagePath = imageReferenceArtifactPath(options.projectDir, result.assetPath);
   await writeFile(referenceImagePath, await readFile(result.assetPath));
-  toolLog(`✅ 画面一致性：角色三视图就绪（text-to-image fallback）→ ${referenceImagePath}`);
+  toolLog(`画面一致性：角色三视图就绪（text-to-image fallback）→ ${referenceImagePath}`);
   return {
     enabled: true,
     provider: describeVisualProvider(imageConfigured.config, 'image'),
@@ -1829,9 +1849,9 @@ export async function generateSegmentKeyframe(options: {
       if (restored?.trim()) {
         visionDescription = restored.trim();
         await writeFile(visionPath, visionDescription, 'utf8');
-        toolLog('🎨 画面一致性：已为分段关键帧补写 VISUAL TRUTH（character-vision-description.txt）');
+        toolLog('画面一致性：已为分段关键帧补写 VISUAL TRUTH（character-vision-description.txt）');
       } else if (options.realPersonInput) {
-        toolWarn('⚠️ 画面一致性：realPersonInput=true 但无法恢复 VISUAL TRUTH；将继续使用安全三视图与温和风格继承，不再强制漫画化关键帧。');
+        toolWarn('画面一致性：realPersonInput=true 但无法恢复 VISUAL TRUTH；将继续使用安全三视图与温和风格继承，不再强制漫画化关键帧。');
       }
     }
   }

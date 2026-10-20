@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { buildStyleEnhancement, matchStyleDna, routeQuestion } from '../src/tools/visual/styleMatch.js';
-import { CONDITIONAL_PRINCIPLES, STYLE_LIBRARY, STYLE_PRINCIPLES, principleById, styleById } from '../src/tools/visual/styleDna.js';
-import { runHermeticSaga, videoTaskBodies } from './sagaHermeticHarness.js';
+import { buildCompactStyleEnhancement, buildStyleEnhancement, matchStyleDna, musicStructureFor, pickStructureTemplate, routeQuestion } from '../src/tools/visual/styleMatch.js';
+import { CONDITIONAL_PRINCIPLES, ELICITATION, STRUCTURE_TEMPLATES, STYLE_LIBRARY, STYLE_PRINCIPLES, principleById, styleById } from '../src/tools/visual/styleDna.js';
+import { runHermeticSaga, videoTaskBodies, withHermeticWorkspace } from './sagaHermeticHarness.js';
 
 /** The library itself: ids unique, every referenced principle exists, every style usable. */
 function libraryChecks(): void {
@@ -13,9 +13,17 @@ function libraryChecks(): void {
     assert.ok(style.motifs.length > 0 && style.camera.length > 0 && style.antiPatterns.length > 0, `${style.id} is missing a field the prompt block needs`);
     for (const id of style.principles) principleById(id);
   }
-  assert.equal(STYLE_PRINCIPLES.length, 25, 'the verification produced 24 transferable principles plus P25');
+  assert.equal(STYLE_PRINCIPLES.length, 28, '24 verified principles, P25, and the three from the director-mode panel and VIBES');
   const principleIds = new Set(STYLE_PRINCIPLES.map((principle) => principle.id));
-  assert.equal(principleIds.size, 25, 'principle ids are unique');
+  assert.equal(principleIds.size, 28, 'principle ids are unique');
+  for (const template of STRUCTURE_TEMPLATES) {
+    assert.ok(template.beats.length >= 3, `${template.id} needs a usable skeleton`);
+    for (const beat of template.beats) assert.ok(beat.span && beat.beat && beat.camera, `${template.id} has an incomplete beat`);
+  }
+  for (const [key, item] of Object.entries(ELICITATION)) {
+    assert.ok(item.question.endsWith('？'), `${key} should read as a question`);
+    assert.ok(item.hint.length > 10, `${key} needs a usable hint`);
+  }
   for (const principle of CONDITIONAL_PRINCIPLES) {
     assert.ok((principle.triggers?.length ?? 0) >= 3, `${principle.id} is conditional, so it needs a usable cue list`);
   }
@@ -87,6 +95,45 @@ function conditionalPrincipleChecks(): void {
   assert.equal(ugc.principles.includes('P25'), false, 'P25 is out of scope for UGC');
 }
 
+/** A request with no structure of its own gets a skeleton; one that brought a script keeps it. */
+function structureChecks(): void {
+  const match = matchStyleDna({ story: '说唱 MV，街头写实，滑板，鱼眼，crew' });
+  assert.ok(match);
+  const template = pickStructureTemplate(match, false);
+  assert.ok(template, 'a request without a structure should get one');
+  assert.equal(template.id, 'four-beat-mv');
+  assert.equal(pickStructureTemplate(match, true), undefined, 'a user who wrote a script keeps it (P27)');
+  const block = buildStyleEnhancement(match, { structureTemplate: template });
+  assert.match(block, /结构 \/ Structure/);
+  assert.match(block, /收束留余味|收束/);
+
+  // The commercial skeleton for an ad, the beauty three-act for cosmetics.
+  const ad = matchStyleDna({ story: '威士忌广告，橡木桶，品鉴，绅士，书房' });
+  assert.ok(ad);
+  assert.equal(pickStructureTemplate(ad, false)?.id, 'four-beat-ad');
+  const cosmetics = matchStyleDna({ story: '大牌美妆商拍，口红质地微距，全程无对白，高级感' });
+  assert.ok(cosmetics);
+  assert.equal(pickStructureTemplate(cosmetics, false)?.id, 'beauty-three-act');
+
+  // Music styles carry their cut-point mapping; VIBES would only fill its numbers.
+  const edm = matchStyleDna({ story: '电音节现场那种感觉，激光烟雾，万人举手，drop 要炸开' });
+  assert.ok(edm);
+  assert.match(String(musicStructureFor(edm)), /build-up/);
+  assert.equal(musicStructureFor(ad), undefined, 'an ad has no music structure');
+}
+
+/** The single-clip path (一句话生成) gets the three locks, within a tight budget. */
+function compactChecks(): void {
+  const match = matchStyleDna({ story: '帮我生成一个说唱 MV 的视频，街头写实，滑板，鱼眼' });
+  assert.ok(match);
+  const compact = buildCompactStyleEnhancement(match);
+  assert.ok(compact.length > 0 && compact.length <= 420, `compact block should fit the budget (got ${compact.length})`);
+  assert.match(compact, /色调 Palette/);
+  assert.match(compact, /禁止 Avoid/);
+  assert.doesNotMatch(compact, /自检|Rules|结构/, 'the compact block carries only what changes the picture');
+  assert.equal(buildCompactStyleEnhancement(match, 40), '', 'an impossible budget yields nothing rather than a truncated lock');
+}
+
 /** The block carries rules, forbidden elements and the anchors' self-check. */
 function blockChecks(): void {
   const match = matchStyleDna({ story: '说唱 MV，街头写实，滑板，鱼眼，crew' });
@@ -132,14 +179,42 @@ async function pipelineChecks(): Promise<void> {
   assert.doesNotMatch(rawPrompts, /赛博朋克/, 'cleanDirect prompts must stay the user\'s own');
 }
 
+/** End to end on the single-clip path: the locks reach the video task itself. */
+async function singleClipPipelineChecks(): Promise<void> {
+  const { executeGenerateVideo } = await import('../src/tools/generateVideo.js');
+  const story = '帮我生成一个说唱 MV 的视频，街头写实，滑板青年，鱼眼镜头，crew 群像。';
+  await withHermeticWorkspace({ render: false }, async (cwd, requests) => {
+    const result = await executeGenerateVideo(
+      { type: 'generate_video', prompt: story, duration: 5, ratio: '9:16', resolution: '480p' } as never,
+      { cwd, permissionMode: 'full-access', sessionId: 'style-single', locale: 'zh-CN', requestWorkspaceSwitch: async () => true } as never,
+    );
+    assert.equal((result as { ok: boolean }).ok, true, String((result as { output: string }).output));
+    const sent = JSON.stringify(videoTaskBodies(requests));
+    assert.match(sent, /赛博朋克|cyberpunk/i, 'the style\'s forbidden list should reach the single-clip task');
+  });
+
+  // cleanDirect on the single-clip path adds nothing either.
+  await withHermeticWorkspace({ render: false }, async (cwd, requests) => {
+    const result = await executeGenerateVideo(
+      { type: 'generate_video', prompt: story, duration: 5, ratio: '9:16', resolution: '480p', cleanDirect: true } as never,
+      { cwd, permissionMode: 'full-access', sessionId: 'style-single-raw', locale: 'zh-CN', requestWorkspaceSwitch: async () => true } as never,
+    );
+    assert.equal((result as { ok: boolean }).ok, true, String((result as { output: string }).output));
+    assert.doesNotMatch(JSON.stringify(videoTaskBodies(requests)), /赛博朋克/, 'cleanDirect keeps the prompt the user\'s own');
+  });
+}
+
 async function main(): Promise<void> {
   libraryChecks();
   matchChecks();
   silenceChecks();
   routeChecks();
   conditionalPrincipleChecks();
+  structureChecks();
+  compactChecks();
   blockChecks();
   await pipelineChecks();
+  await singleClipPipelineChecks();
   console.log('saga style enhancement smoke: ok');
 }
 

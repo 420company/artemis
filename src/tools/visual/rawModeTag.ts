@@ -15,6 +15,39 @@
 //   protection and the Critic stay. Everyday wording ("不要滤镜", "无滤镜",
 //   "short prompt") does not switch it on.
 
+/**
+ * How much of Artemis reaches the video model with the owner's words. One
+ * ladder, because three switches used to answer the same question in two
+ * different ways: a provider marked nsfw stopped the Director on a single
+ * clip but not on a Saga segment, so the same setting behaved differently
+ * depending on which path ran.
+ *
+ *   'directed'  — the default: the Director's spec, the style and aesthetic
+ *                 locks, the rendering rules.
+ *   'undiluted' — the dressing comes off; the analysis, the identity, the
+ *                 character / wardrobe / prop / location locks, subtitle
+ *                 protection and the Critic stay. Asked for by the
+ *                 cleanDirect wording (guide §9.10), and implied by a
+ *                 provider the owner marked nsfw: wrapping an explicit
+ *                 request in cinematic spec reliably dilutes it into
+ *                 generic tasteful imagery, which is the opposite of why
+ *                 that provider was configured.
+ *   'verbatim'  — the script goes as written and nothing is added, not even
+ *                 the analysis. Only the explicit raw-passthrough tag.
+ */
+export type PromptFidelity = 'directed' | 'undiluted' | 'verbatim';
+
+export function promptFidelity(input: { rawPassthrough?: boolean; cleanDirect?: boolean; providerNsfw?: boolean }): PromptFidelity {
+  if (input.rawPassthrough === true) return 'verbatim';
+  if (input.cleanDirect === true || input.providerNsfw === true) return 'undiluted';
+  return 'directed';
+}
+
+/** Whether the Director's spec and the quality locks stay off the prompt. */
+export function dropsDressing(fidelity: PromptFidelity): boolean {
+  return fidelity !== 'directed';
+}
+
 const RAW_TAG = '(?:原样直传|raw[-\\s]?直传)';
 const BRACKETED = `[[【(（]\\s*${RAW_TAG}\\s*[\\]】)）]`;
 const ALONE_ON_LINE = `^[ \\t]*${RAW_TAG}[ \\t]*[。.!！]?[ \\t]*$`;

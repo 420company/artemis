@@ -187,7 +187,7 @@ export async function parseStoryboardImageWithVision(options: {
         }
         if (!res.ok) {
           const errBody = res.text;
-          toolWarn(`⚠️ Storyboard parser: ${candidate.label} failed (HTTP ${res.status}, attempt ${attempt + 1}/${maxAttempts}) — ${errBody.slice(0, 200)}`);
+          toolWarn(`Storyboard parser: ${candidate.label} failed (HTTP ${res.status}, attempt ${attempt + 1}/${maxAttempts}) — ${errBody.slice(0, 200)}`);
           if (attempt < maxAttempts - 1 && (res.status === 429 || (res.status ?? 0) >= 500)) {
             await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
             continue;
@@ -199,30 +199,30 @@ export async function parseStoryboardImageWithVision(options: {
         try {
           parsedResponse = JSON.parse(text);
         } catch {
-          toolWarn(`⚠️ Storyboard parser: ${candidate.label} chat response was not JSON`);
+          toolWarn(`Storyboard parser: ${candidate.label} chat response was not JSON`);
           break;
         }
         const content = parsedResponse.choices?.[0]?.message?.content;
         if (typeof content !== 'string') {
-          toolWarn(`⚠️ Storyboard parser: ${candidate.label} response did not include text content`);
+          toolWarn(`Storyboard parser: ${candidate.label} response did not include text content`);
           break;
         }
         const json = extractJsonObject(content);
         if (!json) {
-          toolWarn(`⚠️ Storyboard parser: no JSON object found in ${candidate.label} response — ${content.slice(0, 300)}`);
+          toolWarn(`Storyboard parser: no JSON object found in ${candidate.label} response — ${content.slice(0, 300)}`);
           break;
         }
         let raw: Record<string, unknown>;
         try {
           raw = JSON.parse(json) as Record<string, unknown>;
         } catch (error) {
-          toolWarn(`⚠️ Storyboard parser: JSON parse failed — ${error instanceof Error ? error.message : String(error)} — ${json.slice(0, 300)}`);
+          toolWarn(`Storyboard parser: JSON parse failed — ${error instanceof Error ? error.message : String(error)} — ${json.slice(0, 300)}`);
           break;
         }
         const rawShots = Array.isArray(raw.shots) ? raw.shots : [];
         const shots = rawShots.map((shot, index) => sanitizeShot(shot, index + 1)).filter((shot): shot is StoryboardShot => Boolean(shot));
         if (shots.length === 0) {
-          toolWarn(`⚠️ Storyboard parser: parsed JSON contained no usable shots — ${json.slice(0, 300)}`);
+          toolWarn(`Storyboard parser: parsed JSON contained no usable shots — ${json.slice(0, 300)}`);
           break;
         }
         return {
@@ -239,7 +239,7 @@ export async function parseStoryboardImageWithVision(options: {
           shots,
         };
       } catch (error) {
-        toolWarn(`⚠️ Storyboard parser: ${candidate.label} ${error instanceof Error ? error.message : String(error)}`);
+        toolWarn(`Storyboard parser: ${candidate.label} ${error instanceof Error ? error.message : String(error)}`);
         if (attempt < maxAttempts - 1) {
           await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
           continue;
