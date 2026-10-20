@@ -14,7 +14,10 @@ import {
 } from '../utils/visualGenerationConfig.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { executeGenerateVideo, sagaSegmentPromptReserve } from './generateVideo.js';
-import { dropsDressing, promptFidelity, stripCleanDirectInstruction, stripRawModeTag } from './visual/rawModeTag.js';
+import { dropsDressing, hasCleanDirectKeyword, hasRawModeTag, promptFidelity, stripCleanDirectInstruction, stripRawModeTag } from './visual/rawModeTag.js';
+import { extractSegmentSoundtrack, generateAudioWithSoundtrack, logSoundtrackReference, soundtrackReferenceEligible } from './visual/segmentSoundtrack.js';
+import { decideAfterSegmentFailure, describeSkippedSegments, lowerResolution, resolutionFallbackWorthIt } from './visual/segmentDegrade.js';
+import { buildSegmentChains, chainConcurrency, describeChains, runChains } from './visual/segmentChains.js';
 import { normalizeVideoResolution, VIDEO_RESOLUTIONS } from './visual/videoParams.js';
 import {
   describeVideoGenerationFailure,
@@ -118,6 +121,8 @@ const DEFAULT_RATIO: SagaRatio = '16:9';
 const DEFAULT_TOTAL_SECONDS = 60;
 const MAX_TOTAL_SECONDS = 600;
 const DEFAULT_TRANSITION: SagaTransitionKind = 'cut';
+/** Three tries as before, then one cheaper try at a lower resolution. */
+const SEGMENT_ATTEMPTS = 4;
 const DEFAULT_CROSSFADE_MS = 350;
 const DEFAULT_LONG_VIDEO_SUBDIR = 'long-videos';
 // Floor (NOT a maximum). Match the custom provider default so Saga does not
@@ -1401,9 +1406,14 @@ export async function executeGenerateLongVideo(
     // raw passthrough sends the script as written, cleanDirect drops the
     // dressing, and a provider the owner marked nsfw drops it too — the same
     // setting used to do that on a single clip but not on a Saga segment.
+    // The wording is read here too, not only by the wizard. A call that comes
+    // straight to this tool used to have its "[原样直传]" stripped out of the
+    // prompt and then ignored, so the owner asked for the script as written
+    // and silently got the opposite.
+    const askedInText = `${resolvedSourceStory || ''}\n${action.story ?? ''}\n${action.prompt ?? ''}`;
     const fidelity = promptFidelity({
-      rawPassthrough: action.rawPassthrough === true,
-      cleanDirect: action.cleanDirect === true,
+      rawPassthrough: action.rawPassthrough === true || hasRawModeTag(askedInText),
+      cleanDirect: action.cleanDirect === true || hasCleanDirectKeyword(askedInText),
       providerNsfw: videoNsfw,
     });
     const rawPassthrough = fidelity === 'verbatim';
@@ -2186,12 +2196,29 @@ export async function executeGenerateLongVideo(
     // retry with audio off if the provider's safety filter rejects the
     // audio for a particular segment.
     const userAudioPreference = action.generateAudio ?? limits.canGenerateAudio;
+    // Seedance 2.5 animates to an audio reference, so a music video's picture
+    // can be on the beat instead of hoping it lands there. Each segment gets
+    // its own slice; the whole track tells a 30-second clip nothing about
+    // which 30 seconds are its own.
+    const soundtrackReference = soundtrackReferenceEligible({
+      referenceInputs: limits.referenceInputs,
+      soundtrackPath: action.soundtrackPath,
+      verbatimSegments,
+    });
+    const segmentSoundtrackDir = path.join(projectDir, 'segments');
+    if (soundtrackReference) logSoundtrackReference(segments.length);
 
     const generatedPaths: string[] = [];
     const reusedSegmentPaths: string[] = [];
     const chainedFromPrev: string[] = [];
     const audioRetriedSegments: number[] = [];
     const chainDroppedSegments: number[] = [];
+    // Segments that never rendered. On a long film one unfilmable paragraph
+    // should not stop the other five hundred; the owner is told which are
+    // missing, and a re-run only pays for those.
+    const segmentFailureMode = action.onSegmentFailure ?? 'stop';
+    const skippedSegments: number[] = [];
+    let consecutiveSegmentFailures = 0;
     const userImageReferenceDroppedSegments: number[] = [];
 
     // If we hit the privacy filter on the chain frame multiple times in a
@@ -2264,8 +2291,30 @@ export async function executeGenerateLongVideo(
         // A progress listener never breaks the generation.
       }
     };
-    for (const segment of segments) {
-      const cutsIn = segment.index > 1 && sanitizedShots?.[segment.index - 1]?.transitionKind === 'cut';
+    /** Chain-local: the things that only mean anything inside one chain. */
+    type ChainState = {
+      previousLastFramePath?: string | undefined;
+      /** Abandoned for the rest of THIS chain after repeated privacy refusals. */
+      chainEnabled: boolean;
+      consecutivePrivacyFails: number;
+      consecutiveSegmentFailures: number;
+    };
+    /** Set when a segment failed in a way that ends the whole run. */
+    let stopResult: ToolExecutionResult | undefined;
+    /** True once any chain gave up on frame chaining, for the summary. */
+    let chainAbandonedMidRun = false;
+
+    const renderSegment = async (
+      segment: (typeof segments)[number],
+      chain: ChainState,
+    ): Promise<'ok' | 'skipped' | 'stop'> => {
+      // Two reasons this segment inherits nothing from the one before it: the
+      // edit cuts into it, or it opens a scene. The second is not an
+      // optimisation -- chapter six happens somewhere else, so carrying
+      // chapter five's closing frame into it is wrong.
+      const shot = sanitizedShots?.[segment.index - 1];
+      const opensScene = shot?.opensScene === true;
+      const cutsIn = segment.index > 1 && (shot?.transitionKind === 'cut' || opensScene);
       // Manual heartbeat check to keep the bridge alive
       if (Date.now() - lastHeartbeat > heartbeatInterval) {
         toolLog(`状态：正在处理长视频项目 ${projectId}，当前进度 ${segment.index}/${segments.length} 段...`);
@@ -2281,7 +2330,7 @@ export async function executeGenerateLongVideo(
         toolLog(`正在生成第 ${segment.index}/${segments.length} 段（${segment.duration}s · ${segment.title ?? '无标题'}）...`);
         segmentProgress(segment, 'started');
         // Generate this segment's Image-2 opening keyframe right before the
-        // BytePlus call. RELAY CHAIN: for shots N>1, `previousLastFramePath`
+        // BytePlus call. RELAY CHAIN: for shots N>1, `chain.previousLastFramePath`
         // holds segment N-1's actual closing frame (extracted at the end of
         // the previous iteration). We pass it as a SECOND input to
         // /images/edits so the keyframe inherits BOTH identity (from the
@@ -2306,7 +2355,7 @@ export async function executeGenerateLongVideo(
               continuity: segment.continuity,
             },
             turnaroundPath: superVisualMode.referenceImagePath,
-            previousLastFramePath: segment.index > 1 && !cutsIn ? previousLastFramePath : undefined,
+            previousLastFramePath: segment.index > 1 && !cutsIn ? chain.previousLastFramePath : undefined,
             realPersonInput,
             accessoriesLock: narrativeEntities?.protagonistAccessories,
             occlusionLock: [
@@ -2395,8 +2444,28 @@ export async function executeGenerateLongVideo(
         // image is being dropped, so the verbal handoff compensates.
         // A hard cut written into the brief (INSTANT HARD CUT) starts a new
         // picture: the previous segment's last frame is not carried over.
-        let usingChain = chainEnabled && previousLastFramePath !== undefined && !cutsIn;
+        let usingChain = chain.chainEnabled && chain.previousLastFramePath !== undefined && !cutsIn;
         let usingAudio = userAudioPreference;
+        // This segment's own slice of the music, cut once and reused across
+        // the retries. A slice that cannot be cut is not a reason to fail the
+        // segment: the run goes on without it and the renderer still mixes
+        // the real track in at the end, exactly as it did before.
+        let segmentSoundtrackPath: string | undefined;
+        if (soundtrackReference && action.soundtrackPath) {
+          const slice = await extractSegmentSoundtrack({
+            soundtrackPath: action.soundtrackPath,
+            startOffsetSec: action.soundtrackStartSec ?? 0,
+            segmentStartSec: segmentStarts[segment.index - 1] ?? 0,
+            segmentDurationSec: segment.duration,
+            outputDir: segmentSoundtrackDir,
+            segmentIndex: segment.index,
+          });
+          if (slice.ok) {
+            segmentSoundtrackPath = slice.path;
+          } else {
+            toolWarn(`第 ${segment.index} 段的配乐切片没切出来（${slice.reason}），这一段不跟音乐，配乐仍会在合成时混入。`);
+          }
+        }
         let usingUserImageReferences = hasGlobalUserImageReferences;
         // Per-segment Image-2 keyframes can occasionally become too
         // photographic in real-person runs. BytePlus then rejects the bytes as
@@ -2408,8 +2477,12 @@ export async function executeGenerateLongVideo(
         let lastError = '';
         let lastFailure: VideoGenerationFailure | undefined;
         let succeeded = false;
+        // A fourth attempt at the same size would do what the first three
+        // did. A smaller one is a different request, it costs less, and a
+        // segment the owner can watch beats a hole in the film.
+        let degradedResolution: string | undefined;
 
-        for (let attempt = 0; attempt < 3 && !succeeded; attempt += 1) {
+        for (let attempt = 0; attempt < SEGMENT_ATTEMPTS && !succeeded; attempt += 1) {
           // role:"reference_image" — the only image role Saga long-video
           // routes user content through. Empirical testing showed
           // role:"first_frame" does NOT bypass the provider's real-person
@@ -2433,11 +2506,11 @@ export async function executeGenerateLongVideo(
           // Retry logic (usingChain=false) strips this from the reference
           // array on privacy-filter failures.
           // 💡 REAL PERSON BYPASS (User's Chain Frame Translation Strategy):
-          // If we are in realPersonInput mode, passing the raw `previousLastFramePath`
+          // If we are in realPersonInput mode, passing the raw `chain.previousLastFramePath`
           // (which is a real-person photographic screenshot) directly to the video API
           // will trigger the provider's strict privacy filter and abort the chain.
           // However, the `segmentKeyframe` generated above ALREADY ingested
-          // `previousLastFramePath` through the safe Super Visual keyframe path,
+          // `chain.previousLastFramePath` through the safe Super Visual keyframe path,
           // preserving the scene handoff without submitting raw real-person
           // screenshots to the video provider. So for real-person runs, we
           // deliberately omit the raw screenshot and rely on that generated
@@ -2447,11 +2520,11 @@ export async function executeGenerateLongVideo(
           // the only handoff, so it is sent for any subject except a real
           // person's photo; a privacy rejection strips it and retries like
           // any chain frame.
-          const rawChainEligible = usingChain && segment.index > 1 && Boolean(previousLastFramePath) && !realPersonInput
+          const rawChainEligible = usingChain && segment.index > 1 && Boolean(chain.previousLastFramePath) && !realPersonInput
             && (!humanOrMixedSubject || !segmentKeyframe);
-          const proxyChainEligible = !verbatimSegments && usingChain && segment.index > 1 && Boolean(previousLastFramePath) && (realPersonInput || humanOrMixedSubject) && Boolean(segmentKeyframe);
-          const chainPaths: string[] = rawChainEligible && previousLastFramePath
-            ? [previousLastFramePath]
+          const proxyChainEligible = !verbatimSegments && usingChain && segment.index > 1 && Boolean(chain.previousLastFramePath) && (realPersonInput || humanOrMixedSubject) && Boolean(segmentKeyframe);
+          const chainPaths: string[] = rawChainEligible && chain.previousLastFramePath
+            ? [chain.previousLastFramePath]
             : [];
           const referenceImagePaths = verbatimSegments
             ? [
@@ -2486,7 +2559,12 @@ export async function executeGenerateLongVideo(
               prompt: sanitizeForVideoProvider(promptToUse),
               referenceImageUrls: referenceImageUrlsForCall.length > 0 ? referenceImageUrlsForCall : undefined,
               referenceImagePaths,
-              generateAudio: usingAudio,
+              ...(segmentSoundtrackPath ? { referenceAudioPaths: [segmentSoundtrackPath] } : {}),
+              ...(degradedResolution ? { resolution: degradedResolution } : {}),
+              generateAudio: generateAudioWithSoundtrack({
+                usingSoundtrackReference: Boolean(segmentSoundtrackPath),
+                requested: usingAudio,
+              }),
             },
             context,
             // Saga's own channel (never action fields): the segment named in
@@ -2502,10 +2580,10 @@ export async function executeGenerateLongVideo(
             // previous tail frame itself, or the keyframe built from it.
             const carriedHandoff = chainPaths.length > 0 || (proxyChainEligible && keyframePaths.length > 0);
             if (carriedHandoff) chainedFromPrev.push(segment.outputPath);
-            if (!usingChain && chainEnabled && previousLastFramePath && !cutsIn) chainDroppedSegments.push(segment.index);
+            if (!usingChain && chain.chainEnabled && chain.previousLastFramePath && !cutsIn) chainDroppedSegments.push(segment.index);
             if (hasGlobalUserImageReferences && !usingUserImageReferences) userImageReferenceDroppedSegments.push(segment.index);
             if (!usingAudio && userAudioPreference) audioRetriedSegments.push(segment.index);
-            if (usingChain) consecutivePrivacyFails = 0;
+            if (usingChain) chain.consecutivePrivacyFails = 0;
             const tags = [
               attempt > 0 ? `重试${attempt}` : '一次过',
               rawChainEligible ? 'raw-chain' : proxyChainEligible ? 'proxy-chain' : usingChain ? 'chain待定' : '无chain',
@@ -2524,6 +2602,19 @@ export async function executeGenerateLongVideo(
           const imageBlocked = isImagePrivacyError(lastError);
           const pollTimeout = isPollTimeoutErrorForTest(lastError);
           if (!audioBlocked && !imageBlocked && !pollTimeout) {
+            // Nothing to strip, so the request itself is being refused. One
+            // smaller request is a different request and sometimes passes --
+            // but only where the size is plausibly the cause. Content that
+            // was refused is refused at any resolution, and a run out of
+            // balance must not spend more finding that out again.
+            const fallback = !degradedResolution && resolutionFallbackWorthIt(lastFailure.kind)
+              ? lowerResolution(requestedResolution)
+              : undefined;
+            if (fallback) {
+              degradedResolution = fallback;
+              toolWarn(`第 ${segment.index}/${segments.length} 段：${requestedResolution ?? '默认画质'} 没能生成（${lastFailure.userMessage}），降到 ${fallback} 再试一次…`);
+              continue;
+            }
             // Non-recoverable error — bail. The user sees the plain reason;
             // the raw provider error follows for the log.
             toolWarn(`第 ${segment.index}/${segments.length} 段生成失败：${lastFailure.userMessage}\n ${lastError.slice(0, 300)}`);
@@ -2550,7 +2641,7 @@ export async function executeGenerateLongVideo(
           // other.
           if (imageBlocked && usingSegmentKeyframe && segmentKeyframe && realPersonInput && !safeBridgeKeyframeAttempted) {
             safeBridgeKeyframeAttempted = true;
-            consecutivePrivacyFails += 1;
+            chain.consecutivePrivacyFails += 1;
             toolWarn(`第 ${segment.index}/${segments.length} 段：视频服务拒绝了分段关键帧，正在生成安全桥接帧后重试（尝试 ${attempt + 2}/3）...`);
             const safeBridge = await generateSafeBridgeKeyframe({
               context,
@@ -2570,11 +2661,11 @@ export async function executeGenerateLongVideo(
             }
           } else if (imageBlocked && usingSegmentKeyframe && segmentKeyframe) {
             usingSegmentKeyframe = false;
-            consecutivePrivacyFails += 1;
+            chain.consecutivePrivacyFails += 1;
             toolWarn(`第 ${segment.index}/${segments.length} 段：视频服务拒绝了分段关键帧，剥离关键帧、保留安全身份锚后重试中（尝试 ${attempt + 2}/3）...`);
           } else if (imageBlocked && usingChain) {
             usingChain = false;
-            consecutivePrivacyFails += 1;
+            chain.consecutivePrivacyFails += 1;
             toolWarn(`第 ${segment.index}/${segments.length} 段：视频服务拒绝了上一段衔接帧，剥离衔接帧后重试中（尝试 ${attempt + 2}/3）...`);
           } else if (imageBlocked && hasGlobalUserImageReferences && usingUserImageReferences) {
             // reference_image got rejected — drop the user-supplied reference
@@ -2587,6 +2678,16 @@ export async function executeGenerateLongVideo(
           } else if (audioBlocked && usingAudio) {
             usingAudio = false;
             toolWarn(`第 ${segment.index}/${segments.length} 段：视频服务拒绝了音频输出，关闭音频后重试中（尝试 ${attempt + 2}/3）...`);
+          } else if (!degradedResolution && resolutionFallbackWorthIt(lastFailure.kind) && lowerResolution(requestedResolution)) {
+            // Nothing left to strip, so the request itself is what is being
+            // refused. One smaller request is a different request -- cheaper,
+            // and what some provider-side limits are actually about -- while
+            // a fourth attempt at the same size would only repeat the first
+            // three. This has to sit here rather than at a fixed attempt
+            // number: the loop breaks out as soon as it runs out of inputs to
+            // drop, which is exactly the case a smaller size can still save.
+            degradedResolution = lowerResolution(requestedResolution);
+            toolWarn(`第 ${segment.index}/${segments.length} 段：${requestedResolution ?? '默认画质'} 没能生成，降到 ${degradedResolution} 再试一次…`);
           } else {
             // Both have already been stripped on a prior attempt and we're
             // still failing; nothing more to try.
@@ -2596,24 +2697,43 @@ export async function executeGenerateLongVideo(
 
         if (!succeeded) {
           segmentProgress(segment, 'failed');
-          return {
-            action,
-            ok: false,
-            output: [
-              `Long video: segment ${segment.index}/${segments.length} failed.`,
-              ...(lastFailure ? [`Reason: ${lastFailure.userMessage}`] : []),
-              scrubInternalNames(lastError),
-            ].join('\n'),
-            ...(lastFailure ? { error: videoFailureToolError(lastFailure) } : {}),
-          };
+          chain.consecutiveSegmentFailures += 1;
+          const decision = decideAfterSegmentFailure({
+            mode: segmentFailureMode,
+            totalSegments: segments.length,
+            failedSoFar: skippedSegments.length + 1,
+            consecutiveFailures: chain.consecutiveSegmentFailures,
+          });
+          if (decision.action === 'stop') {
+            stopResult = {
+              action,
+              ok: false,
+              output: [
+                `Long video: segment ${segment.index}/${segments.length} failed.`,
+                ...(segmentFailureMode === 'skip' ? [`Stopped rather than skipping it: ${decision.reason}.`] : []),
+                ...(lastFailure ? [`Reason: ${lastFailure.userMessage}`] : []),
+                scrubInternalNames(lastError),
+                ...(skippedSegments.length > 0 ? [describeSkippedSegments(skippedSegments, segments.length)] : []),
+              ].join('\n'),
+              ...(lastFailure ? { error: videoFailureToolError(lastFailure) } : {}),
+            };
+            return 'stop';
+          }
+          skippedSegments.push(segment.index);
+          toolWarn(`第 ${segment.index} 段没有生成出来（${lastFailure?.userMessage ?? '未知原因'}），跳过，继续后面的段。`);
+          // Nothing to chain from a segment that does not exist.
+          chain.previousLastFramePath = undefined;
+          return 'skipped';
         }
+        chain.consecutiveSegmentFailures = 0;
 
         // After 2 consecutive image-privacy failures, this entire project
         // is people-heavy enough that further chain attempts will keep
         // failing. Drop chain frames for the remaining segments to save
         // wasted API calls.
-        if (consecutivePrivacyFails >= 2 && chainEnabled) {
-          chainEnabled = false;
+        if (chain.consecutivePrivacyFails >= 2 && chain.chainEnabled) {
+          chain.chainEnabled = false;
+          chainAbandonedMidRun = true;
         }
       }
 
@@ -2626,23 +2746,86 @@ export async function executeGenerateLongVideo(
       if (chainFrames) {
         const framePath = chainFramePathFor(segment, projectDir);
         const framed = await extractLastFrame({ videoPath: segment.outputPath, outputPath: framePath });
-        previousLastFramePath = framed.ok ? framed.framePath : undefined;
+        chain.previousLastFramePath = framed.ok ? framed.framePath : undefined;
       }
-    }
+      return 'ok';
+    };
+
+    // Which segments must wait for the one before them, and which must not.
+    // A segment is filmed with the previous one's closing frame, so it waits;
+    // a hard cut or a scene boundary breaks that, and the chains either side
+    // of a break share nothing -- not the frame, and not the counters that
+    // make a chain give up on a strategy that keeps failing.
+    const chains = buildSegmentChains(segments.map((segment) => {
+      const shot = sanitizedShots?.[segment.index - 1];
+      return {
+        index: segment.index,
+        segment,
+        cutsIn: segment.index > 1 && (shot?.transitionKind === 'cut' || shot?.opensScene === true),
+        opensScene: shot?.opensScene === true,
+      };
+    }));
+    const concurrency = chainConcurrency({ chainCount: chains.length, requested: action.segmentConcurrency });
+    toolLog(describeChains(chains, concurrency));
+    await runChains(
+      chains,
+      concurrency,
+      async (chainGroup) => {
+        const chain: ChainState = {
+          chainEnabled: chainFrames,
+          consecutivePrivacyFails: 0,
+          consecutiveSegmentFailures: 0,
+        };
+        for (const entry of chainGroup.segments) {
+          const outcome = await renderSegment(entry.segment, chain);
+          // A stop ends the whole run; the chains still in flight finish the
+          // segment they are on and no new ones start.
+          if (outcome === 'stop') return [];
+        }
+        return [];
+      },
+      () => stopResult !== undefined,
+    );
+    if (stopResult) return stopResult;
+    // Pushed from several chains at once, so ordered here rather than by
+    // whichever finished first: the message names segments, and a message
+    // that changes order between runs is a message nobody trusts.
+    skippedSegments.sort((a, b) => a - b);
 
     if (finalRenderSkippedForTests) {
       return { action, ok: true, output: `Long video: ${segments.length} segments generated; the final render was skipped.` };
     }
 
-    const segmentProbes = await Promise.all(segments.map((segment) => probeSegment(segment.outputPath)));
+    // Segments that never rendered are not in the film. Their transitions go
+    // with them, rebuilt from the shots that survived rather than reindexed
+    // by hand, so a crossfade never points at a clip that is not there.
+    const renderedSegments = skippedSegments.length === 0
+      ? segments
+      : segments.filter((segment) => !skippedSegments.includes(segment.index));
+    if (renderedSegments.length === 0) {
+      return {
+        action,
+        ok: false,
+        output: `Long video: none of the ${segments.length} segments rendered, so there is nothing to assemble.`,
+      };
+    }
+    const renderedTransitions = skippedSegments.length === 0
+      ? transitionPlans
+      : buildTransitionPlans({
+        ...(storyboardShots ? { shots: storyboardShots.filter((_, index) => !skippedSegments.includes(index + 1)) } : {}),
+        segmentCount: renderedSegments.length,
+        defaultKind: defaultTransition,
+        defaultMs: crossfadeMs,
+      });
+    const segmentProbes = await Promise.all(renderedSegments.map((segment) => probeSegment(segment.outputPath)));
 
     // Render via the Saga renderer (FFmpeg pipeline + composition + lint + inspect).
     const renderResult = await renderSagaProject({
       projectId,
       ratio,
       fps,
-      segments,
-      transitions: transitionPlans,
+      segments: renderedSegments,
+      transitions: renderedTransitions,
       hyperframesProjectDir,
       outputPath: resolvedOutput.absolute,
       workDir: projectDir,
@@ -2672,14 +2855,19 @@ export async function executeGenerateLongVideo(
     });
     const outputProbe = await probeSegment(resolvedOutput.absolute);
     const measuredOutputSeconds = outputProbe.durationSeconds ?? renderResult.durationSeconds;
-    const shortfallToleranceSeconds = Math.max(2, totalSeconds * 0.2);
-    if (measuredOutputSeconds + shortfallToleranceSeconds < totalSeconds) {
+    // A film with segments skipped is short on purpose; the check is about a
+    // render that silently lost footage, not about the gaps we reported.
+    const expectedSeconds = skippedSegments.length === 0
+      ? totalSeconds
+      : renderedSegments.reduce((sum, segment) => sum + segment.duration, 0);
+    const shortfallToleranceSeconds = Math.max(2, expectedSeconds * 0.2);
+    if (measuredOutputSeconds + shortfallToleranceSeconds < expectedSeconds) {
       return {
         action,
         ok: false,
         output: [
           'Long video: final duration verification failed.',
-          `Requested ${totalSeconds}s, renderer expected ${renderResult.durationSeconds.toFixed(2)}s, actual file is ${measuredOutputSeconds.toFixed(2)}s.`,
+          `Expected ${expectedSeconds}s, renderer expected ${renderResult.durationSeconds.toFixed(2)}s, actual file is ${measuredOutputSeconds.toFixed(2)}s.`,
           `Video: ${resolvedOutput.absolute}`,
           outputProbe.error ? `Probe: ${outputProbe.error}` : undefined,
         ].filter(Boolean).join('\n'),
@@ -2799,7 +2987,7 @@ export async function executeGenerateLongVideo(
         audioRetriedSegments,
         userAudioPreference,
         continuityMode,
-        chainAbandonedMidRun: chainEnabled !== chainFrames,
+        chainAbandonedMidRun,
         storyboard: {
           requestedStoryboardImageCount: storyboardImagePaths.length + nonEmptyStringArray(action.storyboardImageUrls).length,
           parsedStoryboardCount: storyboardParseResults.length,
@@ -2978,11 +3166,11 @@ export async function executeGenerateLongVideo(
       ...outputBlock,
       '',
       '📊 Stats:',
-      `   · Segments:     ${segments.length} × ≤${limits.maxSegmentSeconds}s · planned ${actualTotalSeconds}s · actual ${measuredOutputSeconds.toFixed(2)}s · resolution ${requestedResolution ?? 'provider default'}`,
+      `   · Segments:     ${renderedSegments.length}${skippedSegments.length > 0 ? `/${segments.length}` : ''} × ≤${limits.maxSegmentSeconds}s · planned ${actualTotalSeconds}s · actual ${measuredOutputSeconds.toFixed(2)}s · resolution ${requestedResolution ?? 'provider default'}`,
       `   · Transitions:  ${transitionSummary}`,
       `   · Audio:        requested=${userAudioPreference} · safety-retries=${audioRetriedSegments.length}`,
       `   · Soundtrack:   ${soundtrackLine}`,
-      `   · Continuity:   ${continuityMode} · chain=${chainFrames} · chained=${chainedFromPrev.length}/${segments.length} · dropped=${chainDroppedSegments.length}${chainEnabled !== chainFrames ? ' (chain abandoned mid-run)' : ''}`,
+      `   · Continuity:   ${continuityMode} · chain=${chainFrames} · chained=${chainedFromPrev.length}/${segments.length} · dropped=${chainDroppedSegments.length}${chainAbandonedMidRun ? ' (chain abandoned mid-run)' : ''}`,
       `   · Consistency:  ${superVisualMode.enabled ? `${superVisualMode.mode} · userImagesUsed=${superVisualMode.userImagesUsed}` : `off (${plainConsistencyReason(superVisualMode.reason)})`}`,
       `   · Keyframes:    generated=${segmentKeyframePaths.size}/${segments.length}${segmentKeyframeFailures.length > 0 ? ` · failures=${segmentKeyframeFailures.length}` : ''} · images=${superVisualImageBudget.used}/${superVisualImageBudget.max}`,
       `   · References:   user-image-dropped=${userImageReferenceDroppedSegments.length}`,
@@ -3010,6 +3198,10 @@ export async function executeGenerateLongVideo(
       '',
       `🎬 Open: open "${resolvedOutput.absolute}"`,
     );
+    // Said on the way out too: a film with gaps must never look finished.
+    if (skippedSegments.length > 0) {
+      lines.push('', describeSkippedSegments(skippedSegments, segments.length));
+    }
 
     return {
       action,

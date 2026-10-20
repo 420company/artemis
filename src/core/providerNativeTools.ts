@@ -1408,6 +1408,7 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
           preserveUserScript: { type: 'boolean', description: 'When true, the pipeline may still lint the planned shots but must not use the story check/rewriter to alter user-authored story beats. Automatically implied for timestamped scripts.' },
           cleanDirect: { type: 'boolean', description: 'Low-filter look (原始质感 / 少滤镜 / raw-seedance / clean-direct): drops the aesthetic dressing (style and aesthetic locks, prompt scaffolding, rendering rules) but keeps narrative analysis, identity, the character / wardrobe / prop / location locks, subtitle protection and the critic.' },
           rawPassthrough: { type: 'boolean', description: 'Only for an explicit [原样直传] / 【raw直传】 request: the script goes to the video model as written (no narrative analysis, identity-consistency pass, keyframes or Director), within the model prompt limit. The previous segment\'s last frame is still passed on for continuity.' },
+          onSegmentFailure: { type: 'string', enum: ['stop', 'skip'], description: 'One segment that will not render after every retry: stop fails the run (the default), skip leaves it out and finishes the rest. Only use skip for a long film where one missing shot is better than nothing.' },
           chainReferenceFrames: optionalStringSchema('Frame chaining policy: auto (default) | always | off.'),
           continuityMode: optionalStringSchema('Continuity mode: auto (default) | strong-vision | text-only.'),
           crossfadeMs: integerSchema('Default transition duration in milliseconds.'),
@@ -1564,6 +1565,27 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
     case 'create_document':
     case 'create_spreadsheet':
       return officeToolSchema(type);
+    case 'enhance_script':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          story: optionalStringSchema('The script the user pasted, or the idea to write one from.'),
+          storyPath: optionalStringSchema('A text file the user dropped in instead (a novel is not pasted into a text box).'),
+          mode: {
+            type: 'string',
+            enum: ['have_script', 'from_idea'],
+            description: 'Omit to detect it: have_script keeps every word of a finished script and only adds the Saga shell; from_idea writes a whole script. A pasted script defaults to have_script.',
+          },
+          subject: { type: 'string', enum: ['lead', 'product', 'visual'], description: 'What the film is about: a lead character, a product, or pure visuals.' },
+          identityMode: { type: 'string', enum: ['auto', 'direct_image', 'character_image', 'turnaround', 'text_only'], description: 'Where the character identity comes from.' },
+          ratio: optionalStringSchema('Aspect ratio, e.g. 16:9, 9:16, 1:1.'),
+          totalSeconds: { type: 'integer', minimum: 6, maximum: 600, description: 'Length of the finished film; the script budget follows from it.' },
+          segmentCapSeconds: { type: 'integer', minimum: 1, maximum: 30, description: 'Longest single segment, when the user set one.' },
+          subtitleMode: { type: 'string', enum: ['off', 'auto', 'always'], description: 'Subtitles.' },
+          allowAdaptation: { type: 'boolean', description: 'Only after the user chose it: adapt a text far longer than the duration can hold, which drops much of the original.' },
+        },
+      };
     case 'transcribe_audio':
       return {
         type: 'object',

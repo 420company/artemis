@@ -214,11 +214,35 @@ export type VideoTaskOptions = {
   progressLabel?: string;
 };
 
+/**
+ * The one place a video generation leaves this machine.
+ *
+ * A dry run replaces it so the whole pipeline -- planning, identity, the
+ * continuity bible, the compiled per-segment prompts, the frame chain, the
+ * ffmpeg assembly, the lint -- can be exercised against real files without a
+ * provider call and without spending anything. Everything but this step
+ * stays real, which is the point: a stub that also skips the assembly would
+ * not tell us the assembly works.
+ */
+export type VideoGenerationStub = (
+  action: GenerateVideoAction,
+  context: ToolExecutionContext,
+  task: VideoTaskOptions,
+) => Promise<ToolExecutionResult>;
+
+let videoGenerationStub: VideoGenerationStub | undefined;
+
+/** Tests only. Passing undefined restores the real path. */
+export function setVideoGenerationStubForTests(stub: VideoGenerationStub | undefined): void {
+  videoGenerationStub = stub;
+}
+
 export async function executeGenerateVideo(
   action: GenerateVideoAction,
   context: ToolExecutionContext,
   task: VideoTaskOptions = {},
 ): Promise<ToolExecutionResult> {
+  if (videoGenerationStub) return videoGenerationStub(action, context, task);
   try {
     const configuredResult = await tryGenerateWithConfiguredVisualProvider(action, context, task);
     if (configuredResult) {

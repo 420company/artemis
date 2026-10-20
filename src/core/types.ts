@@ -720,6 +720,13 @@ export type AgentAction =
       shots?: Array<{
         title?: string;
         duration?: number;
+        /**
+         * This shot opens a scene, so it inherits nothing from the shot
+         * before it: no closing frame, no camera, no light. Set by whatever
+         * cut the source up (longformSplit.ts for a novel), because only that
+         * knows where one scene ended and the next began.
+         */
+        opensScene?: boolean;
         storyBeat?: string;
         visualPrompt?: string;
         prompt?: string;
@@ -801,6 +808,17 @@ export type AgentAction =
       // analysis, Super Visual, keyframes or Director), within the model's
       // prompt limit.
       rawPassthrough?: boolean;
+      /**
+       * One segment that will not render: 'stop' fails the run (the default),
+       * 'skip' leaves it out and finishes the rest. Long films want 'skip'.
+       */
+      onSegmentFailure?: 'stop' | 'skip';
+      /**
+       * How many independent shot chains to film at once. Chains are the runs
+       * of segments between hard cuts and scene boundaries; segments inside
+       * one still wait for the previous closing frame. Default 3.
+       */
+      segmentConcurrency?: number;
       chainReferenceFrames?: 'auto' | 'always' | 'off';
       crossfadeMs?: number;
       defaultTransition?:
@@ -948,6 +966,29 @@ export type AgentAction =
       calleeName?: string;
       onBehalfOf?: string;
       maxMinutes?: number;
+    }
+  | {
+      type: 'enhance_script';
+      /** The pasted script or idea. */
+      story?: string;
+      /** A dropped file instead (a novel is not pasted into a text box). */
+      storyPath?: string;
+      /** Omitted: detected from the text. */
+      mode?: 'have_script' | 'from_idea';
+      subject?: 'lead' | 'product' | 'visual';
+      identityMode?: 'auto' | 'direct_image' | 'character_image' | 'turnaround' | 'text_only';
+      slots?: { name?: string; referenceCount?: number; looks?: string }[];
+      firstFrame?: string;
+      lastFrame?: string;
+      ratio?: string;
+      totalSeconds?: number;
+      segmentCapSeconds?: number;
+      subtitleMode?: 'off' | 'auto' | 'always';
+      /** The video model the script is budgeted against; the configured one by default. */
+      provider?: string;
+      model?: string;
+      /** Film a text longer than the duration can hold, by adapting it. */
+      allowAdaptation?: boolean;
     }
   | {
       type: 'transcribe_audio';
@@ -1103,6 +1144,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'generate_video',
   'generate_long_video',
   'synthesize_speech',
+  'enhance_script',
   'transcribe_audio',
   'place_call',
   'create_presentation',
