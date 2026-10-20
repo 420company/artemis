@@ -1564,6 +1564,27 @@ export function buildActionParametersSchema(type: AgentActionType): JsonSchema {
     case 'create_document':
     case 'create_spreadsheet':
       return officeToolSchema(type);
+    case 'enhance_script':
+      return {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          story: optionalStringSchema('The script the user pasted, or the idea to write one from.'),
+          storyPath: optionalStringSchema('A text file the user dropped in instead (a novel is not pasted into a text box).'),
+          mode: {
+            type: 'string',
+            enum: ['have_script', 'from_idea'],
+            description: 'Omit to detect it: have_script keeps every word of a finished script and only adds the Saga shell; from_idea writes a whole script. A pasted script defaults to have_script.',
+          },
+          subject: { type: 'string', enum: ['lead', 'product', 'visual'], description: 'What the film is about: a lead character, a product, or pure visuals.' },
+          identityMode: { type: 'string', enum: ['auto', 'direct_image', 'character_image', 'turnaround', 'text_only'], description: 'Where the character identity comes from.' },
+          ratio: optionalStringSchema('Aspect ratio, e.g. 16:9, 9:16, 1:1.'),
+          totalSeconds: { type: 'integer', minimum: 6, maximum: 600, description: 'Length of the finished film; the script budget follows from it.' },
+          segmentCapSeconds: { type: 'integer', minimum: 1, maximum: 30, description: 'Longest single segment, when the user set one.' },
+          subtitleMode: { type: 'string', enum: ['off', 'auto', 'always'], description: 'Subtitles.' },
+          allowAdaptation: { type: 'boolean', description: 'Only after the user chose it: adapt a text far longer than the duration can hold, which drops much of the original.' },
+        },
+      };
     case 'transcribe_audio':
       return {
         type: 'object',

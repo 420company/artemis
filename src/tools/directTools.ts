@@ -28,6 +28,7 @@ const BUILTIN_DIRECT_TOOL_CANDIDATES: readonly AgentActionType[] = [
   'generate_video',
   'generate_long_video',
   'synthesize_speech',
+  'enhance_script',
   'transcribe_audio',
   // Office documents: .pptx / .docx / .xlsx from a spec.
   'create_presentation',

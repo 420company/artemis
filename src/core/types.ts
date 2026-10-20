@@ -950,6 +950,26 @@ export type AgentAction =
       maxMinutes?: number;
     }
   | {
+      type: 'enhance_script';
+      /** The pasted script or idea. */
+      story?: string;
+      /** A dropped file instead (a novel is not pasted into a text box). */
+      storyPath?: string;
+      /** Omitted: detected from the text. */
+      mode?: 'have_script' | 'from_idea';
+      subject?: 'lead' | 'product' | 'visual';
+      identityMode?: 'auto' | 'direct_image' | 'character_image' | 'turnaround' | 'text_only';
+      slots?: { name?: string; referenceCount?: number; looks?: string }[];
+      firstFrame?: string;
+      lastFrame?: string;
+      ratio?: string;
+      totalSeconds?: number;
+      segmentCapSeconds?: number;
+      subtitleMode?: 'off' | 'auto' | 'always';
+      /** Film a text longer than the duration can hold, by adapting it. */
+      allowAdaptation?: boolean;
+    }
+  | {
       type: 'transcribe_audio';
       inputPath: string;
       language?: string;
@@ -1103,6 +1123,7 @@ export const ALL_AGENT_ACTION_TYPES = [
   'generate_video',
   'generate_long_video',
   'synthesize_speech',
+  'enhance_script',
   'transcribe_audio',
   'place_call',
   'create_presentation',

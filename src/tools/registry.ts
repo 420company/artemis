@@ -76,6 +76,7 @@ import { MAX_REFERENCE_IMAGES } from './visual/referenceImages.js';
 import { executeGenerateLongVideo } from './generateLongVideo.js';
 import { executeGenerateVideo } from './generateVideo.js';
 import { executeSynthesizeSpeech } from './synthesizeSpeech.js';
+import { executeEnhanceScript } from './enhanceScript.js';
 import { executeTranscribeAudio } from './transcribeAudio.js';
 import { executePlaceCall, PLACE_CALL_DESCRIPTION } from './phoneCall/placeCall.js';
 import { executeOfficeDocument } from './officeDocuments.js';
@@ -817,6 +818,25 @@ function validatePlaceCallAction(action: any): string[] {
   return errors;
 }
 
+function validateEnhanceScriptAction(action: any): string[] {
+  const errors: string[] = [];
+  validateOptionalNonEmptyString(action?.story, 'story', errors);
+  validateOptionalNonEmptyString(action?.storyPath, 'storyPath', errors);
+  if (!action?.story && !action?.storyPath) errors.push('story or storyPath is required');
+  validateEnumString(action?.mode, 'mode', ['have_script', 'from_idea'] as const, errors);
+  validateEnumString(action?.subject, 'subject', ['lead', 'product', 'visual'] as const, errors);
+  validateEnumString(action?.identityMode, 'identityMode', ['auto', 'direct_image', 'character_image', 'turnaround', 'text_only'] as const, errors);
+  validateOptionalNonEmptyString(action?.firstFrame, 'firstFrame', errors);
+  validateOptionalNonEmptyString(action?.lastFrame, 'lastFrame', errors);
+  validateOptionalNonEmptyString(action?.ratio, 'ratio', errors);
+  validatePositiveInteger(action?.totalSeconds, 'totalSeconds', errors);
+  validatePositiveInteger(action?.segmentCapSeconds, 'segmentCapSeconds', errors);
+  validateEnumString(action?.subtitleMode, 'subtitleMode', ['off', 'auto', 'always'] as const, errors);
+  validateBooleanValue(action?.allowAdaptation, 'allowAdaptation', errors);
+  if (action?.slots !== undefined && !Array.isArray(action.slots)) errors.push('slots must be an array');
+  return errors;
+}
+
 function validateTranscribeAudioAction(action: any): string[] {
   const errors: string[] = [];
   validateRequiredNonEmptyString(action?.inputPath, 'inputPath', errors);
@@ -1261,6 +1281,16 @@ const actionToolDefs: ToolDefinition[] = [
     parallelSafe: false,
     validate: validateSynthesizeSpeechAction,
     execute: executeSynthesizeSpeech as any,
+  },
+  {
+    type: 'enhance_script',
+    description: '把用户粘贴或拖进来的剧本按 Saga 规格结构化（时间码分段、段标题、镜头机位、画质规格、声音层级），用户原文一个字不改；只给了想法时改为写出完整剧本。结果返回给用户先看、可改，再去生成视频。',
+    kind: 'code',
+    permissionCategory: 'execute',
+    executionMode: 'blocking',
+    parallelSafe: false,
+    validate: validateEnhanceScriptAction,
+    execute: executeEnhanceScript as any,
   },
   {
     type: 'transcribe_audio',
