@@ -3,6 +3,7 @@ import {
   decideAfterSegmentFailure,
   describeSkippedSegments,
   lowerResolution,
+  resolutionFallbackWorthIt,
 } from '../src/tools/visual/segmentDegrade.js';
 
 /**
@@ -22,6 +23,25 @@ function resolutionChecks(): void {
   assert.equal(lowerResolution('1080p', []), undefined);
   // An unknown name is not silently downgraded.
   assert.equal(lowerResolution('4k'), undefined);
+}
+
+/**
+ * One more call at a smaller size is only worth making where the size is
+ * plausibly the cause. Content that was refused is refused at any resolution,
+ * and a run out of balance must not spend more finding that out again.
+ */
+function worthItChecks(): void {
+  assert.equal(resolutionFallbackWorthIt('payload_too_large'), true);
+  assert.equal(resolutionFallbackWorthIt('timeout'), true);
+  assert.equal(resolutionFallbackWorthIt('upstream'), true);
+  // The ones a smaller request cannot fix.
+  assert.equal(resolutionFallbackWorthIt('content_rejected'), false, '内容被拒，降画质没用');
+  assert.equal(resolutionFallbackWorthIt('insufficient_balance'), false, '余额不足不能再烧一次');
+  assert.equal(resolutionFallbackWorthIt('unauthorized'), false);
+  assert.equal(resolutionFallbackWorthIt('not_configured'), false);
+  assert.equal(resolutionFallbackWorthIt('rate_limited'), false, '限流要等，不是变小');
+  assert.equal(resolutionFallbackWorthIt('download_failed'), false);
+  assert.equal(resolutionFallbackWorthIt(undefined), false);
 }
 
 /**
@@ -69,6 +89,7 @@ function reportChecks(): void {
 
 function main(): void {
   resolutionChecks();
+  worthItChecks();
   policyChecks();
   reportChecks();
   console.log('saga segment degrade smoke: ok');

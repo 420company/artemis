@@ -14,9 +14,9 @@ import {
 } from '../utils/visualGenerationConfig.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { executeGenerateVideo, sagaSegmentPromptReserve } from './generateVideo.js';
-import { dropsDressing, promptFidelity, stripCleanDirectInstruction, stripRawModeTag } from './visual/rawModeTag.js';
+import { dropsDressing, hasCleanDirectKeyword, hasRawModeTag, promptFidelity, stripCleanDirectInstruction, stripRawModeTag } from './visual/rawModeTag.js';
 import { extractSegmentSoundtrack, generateAudioWithSoundtrack, logSoundtrackReference, soundtrackReferenceEligible } from './visual/segmentSoundtrack.js';
-import { decideAfterSegmentFailure, describeSkippedSegments, lowerResolution } from './visual/segmentDegrade.js';
+import { decideAfterSegmentFailure, describeSkippedSegments, lowerResolution, resolutionFallbackWorthIt } from './visual/segmentDegrade.js';
 import { normalizeVideoResolution, VIDEO_RESOLUTIONS } from './visual/videoParams.js';
 import {
   describeVideoGenerationFailure,
@@ -1405,9 +1405,14 @@ export async function executeGenerateLongVideo(
     // raw passthrough sends the script as written, cleanDirect drops the
     // dressing, and a provider the owner marked nsfw drops it too — the same
     // setting used to do that on a single clip but not on a Saga segment.
+    // The wording is read here too, not only by the wizard. A call that comes
+    // straight to this tool used to have its "[原样直传]" stripped out of the
+    // prompt and then ignored, so the owner asked for the script as written
+    // and silently got the opposite.
+    const askedInText = `${resolvedSourceStory || ''}\n${action.story ?? ''}\n${action.prompt ?? ''}`;
     const fidelity = promptFidelity({
-      rawPassthrough: action.rawPassthrough === true,
-      cleanDirect: action.cleanDirect === true,
+      rawPassthrough: action.rawPassthrough === true || hasRawModeTag(askedInText),
+      cleanDirect: action.cleanDirect === true || hasCleanDirectKeyword(askedInText),
       providerNsfw: videoNsfw,
     });
     const rawPassthrough = fidelity === 'verbatim';
@@ -2455,11 +2460,6 @@ export async function executeGenerateLongVideo(
         let degradedResolution: string | undefined;
 
         for (let attempt = 0; attempt < SEGMENT_ATTEMPTS && !succeeded; attempt += 1) {
-          if (attempt === SEGMENT_ATTEMPTS - 1) {
-            degradedResolution = lowerResolution(requestedResolution);
-            if (!degradedResolution) break;
-            toolWarn(`第 ${segment.index} 段三次都没出来，降到 ${degradedResolution} 再试一次。`);
-          }
           // role:"reference_image" — the only image role Saga long-video
           // routes user content through. Empirical testing showed
           // role:"first_frame" does NOT bypass the provider's real-person
@@ -2579,6 +2579,19 @@ export async function executeGenerateLongVideo(
           const imageBlocked = isImagePrivacyError(lastError);
           const pollTimeout = isPollTimeoutErrorForTest(lastError);
           if (!audioBlocked && !imageBlocked && !pollTimeout) {
+            // Nothing to strip, so the request itself is being refused. One
+            // smaller request is a different request and sometimes passes --
+            // but only where the size is plausibly the cause. Content that
+            // was refused is refused at any resolution, and a run out of
+            // balance must not spend more finding that out again.
+            const fallback = !degradedResolution && resolutionFallbackWorthIt(lastFailure.kind)
+              ? lowerResolution(requestedResolution)
+              : undefined;
+            if (fallback) {
+              degradedResolution = fallback;
+              toolWarn(`第 ${segment.index}/${segments.length} 段：${requestedResolution ?? '默认画质'} 没能生成（${lastFailure.userMessage}），降到 ${fallback} 再试一次…`);
+              continue;
+            }
             // Non-recoverable error — bail. The user sees the plain reason;
             // the raw provider error follows for the log.
             toolWarn(`第 ${segment.index}/${segments.length} 段生成失败：${lastFailure.userMessage}\n ${lastError.slice(0, 300)}`);
@@ -2642,6 +2655,16 @@ export async function executeGenerateLongVideo(
           } else if (audioBlocked && usingAudio) {
             usingAudio = false;
             toolWarn(`第 ${segment.index}/${segments.length} 段：视频服务拒绝了音频输出，关闭音频后重试中（尝试 ${attempt + 2}/3）...`);
+          } else if (!degradedResolution && resolutionFallbackWorthIt(lastFailure.kind) && lowerResolution(requestedResolution)) {
+            // Nothing left to strip, so the request itself is what is being
+            // refused. One smaller request is a different request -- cheaper,
+            // and what some provider-side limits are actually about -- while
+            // a fourth attempt at the same size would only repeat the first
+            // three. This has to sit here rather than at a fixed attempt
+            // number: the loop breaks out as soon as it runs out of inputs to
+            // drop, which is exactly the case a smaller size can still save.
+            degradedResolution = lowerResolution(requestedResolution);
+            toolWarn(`第 ${segment.index}/${segments.length} 段：${requestedResolution ?? '默认画质'} 没能生成，降到 ${degradedResolution} 再试一次…`);
           } else {
             // Both have already been stripped on a prior attempt and we're
             // still failing; nothing more to try.
@@ -3076,7 +3099,7 @@ export async function executeGenerateLongVideo(
       ...outputBlock,
       '',
       '📊 Stats:',
-      `   · Segments:     ${segments.length} × ≤${limits.maxSegmentSeconds}s · planned ${actualTotalSeconds}s · actual ${measuredOutputSeconds.toFixed(2)}s · resolution ${requestedResolution ?? 'provider default'}`,
+      `   · Segments:     ${renderedSegments.length}${skippedSegments.length > 0 ? `/${segments.length}` : ''} × ≤${limits.maxSegmentSeconds}s · planned ${actualTotalSeconds}s · actual ${measuredOutputSeconds.toFixed(2)}s · resolution ${requestedResolution ?? 'provider default'}`,
       `   · Transitions:  ${transitionSummary}`,
       `   · Audio:        requested=${userAudioPreference} · safety-retries=${audioRetriedSegments.length}`,
       `   · Soundtrack:   ${soundtrackLine}`,

@@ -36,6 +36,18 @@ export function lowerResolution(
   return order[index - 1];
 }
 
+/**
+ * Whether one more call at a smaller size is worth making.
+ *
+ * Only where the size is plausibly the cause. Content that was refused is
+ * refused at any resolution, and a run that has no balance left must not
+ * spend more finding that out again -- an extra call on every failure would
+ * be a tax on the failures that a smaller request cannot fix.
+ */
+export function resolutionFallbackWorthIt(kind: string | undefined): boolean {
+  return kind === 'payload_too_large' || kind === 'timeout' || kind === 'upstream';
+}
+
 export type SegmentFailureMode = 'stop' | 'skip';
 
 export type SegmentFailureDecision =
