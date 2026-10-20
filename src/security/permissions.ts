@@ -313,6 +313,7 @@ function describeAction(action: AgentAction): string {
     case 'notebook_addTag': return `notebook addTag`;
     case 'notebook_removeTag': return `notebook removeTag`;
     case 'notebook_tree': return `notebook tree`;
+    case 'enhance_script': return '把剧本按 Saga 规格结构化';
     default: {
       const exhaustive: never = action;
       return exhaustive;

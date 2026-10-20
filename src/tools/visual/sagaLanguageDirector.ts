@@ -337,7 +337,22 @@ export function extractSagaDialogueLines(text: string, options: { knownSpeakers?
   return uniqueLines(lines);
 }
 
+/**
+ * Spoken lines listed in one segment's prompt.
+ *
+ * Eight was right when a clip was ten seconds. Seedance 2.0 films 15 seconds
+ * in one clip and 2.5 films 30, and a 30-second clip holding only eight lines
+ * drops dialogue the owner wrote. A comfortable spoken pace is about one line
+ * every two and a half seconds, so the cap follows the clip; without a
+ * duration it stays where it was.
+ */
 const DIALOGUE_BLOCK_MAX_LINES = 8;
+const SECONDS_PER_SPOKEN_LINE = 2.5;
+
+function dialogueLineCap(segmentSeconds: number | undefined): number {
+  if (!segmentSeconds || !Number.isFinite(segmentSeconds) || segmentSeconds <= 0) return DIALOGUE_BLOCK_MAX_LINES;
+  return Math.max(4, Math.round(segmentSeconds / SECONDS_PER_SPOKEN_LINE));
+}
 
 function describeDialogueLine(line: SagaDialogueLine): string {
   const text = line.text.length > 90 ? `${line.text.slice(0, 89)}…` : line.text;
@@ -351,6 +366,8 @@ const COMPACT_DIALOGUE_LIST_CHARS = 200;
 type DialogueBlockOptions = {
   /** Fewer listed lines: the prompt below already carries them. */
   compact?: boolean;
+  /** This segment's length, which decides how many lines can be spoken in it. */
+  segmentSeconds?: number;
   /**
    * Saga briefs (guide §3.2): only marked lines are speech. A plain
    * generate_video prompt keeps the general rule that quoted speech is
@@ -361,6 +378,7 @@ type DialogueBlockOptions = {
 
 function buildDialogueBlock(dialogueLines: SagaDialogueLine[], subtitleMode: SagaSubtitleMode = 'auto', options: DialogueBlockOptions = {}): string {
   const { compact = false, markedDialogueOnly = false } = options;
+  const maxListed = dialogueLineCap(options.segmentSeconds);
   const subtitlePolicy = subtitleMode === 'always'
     ? '- Render readable on-screen subtitles/captions for spoken dialogue and voiceover, preserving the exact original characters.'
     : subtitleMode === 'off'
@@ -387,7 +405,7 @@ function buildDialogueBlock(dialogueLines: SagaDialogueLine[], subtitleMode: Sag
     ].join('\n');
   }
   const listed: string[] = [];
-  for (const line of dialogueLines.slice(0, DIALOGUE_BLOCK_MAX_LINES)) {
+  for (const line of dialogueLines.slice(0, maxListed)) {
     const entry = describeDialogueLine(line);
     if (compact && listed.length > 0 && [...listed, entry].join('; ').length > COMPACT_DIALOGUE_LIST_CHARS) break;
     listed.push(entry);
@@ -427,9 +445,11 @@ function withoutLeadingDialogueBlock(text: string): string {
  * (cleanDirect, raw passthrough): this text's own marked lines, or nothing
  * when it has none.
  */
-export function buildSagaDialogueNote(text: string, subtitleMode: SagaSubtitleMode = 'auto'): string {
+export function buildSagaDialogueNote(text: string, subtitleMode: SagaSubtitleMode = 'auto', segmentSeconds?: number): string {
   const lines = extractSagaDialogueLines(relocateDialogueCues(text));
-  return lines.length > 0 ? buildDialogueBlock(lines, subtitleMode, { compact: true, markedDialogueOnly: true }) : '';
+  return lines.length > 0
+    ? buildDialogueBlock(lines, subtitleMode, { compact: true, markedDialogueOnly: true, ...(segmentSeconds ? { segmentSeconds } : {}) })
+    : '';
 }
 
 export function buildDeterministicEnglishVisualPrompt(input: {

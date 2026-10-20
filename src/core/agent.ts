@@ -864,6 +864,26 @@ function buildActionFromLooseArgs(
         ...(maxMinutes !== undefined ? { maxMinutes } : {}),
       };
     }
+    case 'enhance_script': {
+      const story = getLooseStringArg(args, 'story', 'script', 'text');
+      const storyPath = getLooseStringArg(args, 'storyPath', 'story_path', 'path', 'file');
+      if (!story?.trim() && !storyPath?.trim()) return null;
+      const totalSeconds = getLooseNumberArg(args, 'totalSeconds', 'total_seconds', 'duration');
+      const segmentCapSeconds = getLooseNumberArg(args, 'segmentCapSeconds', 'segment_cap_seconds');
+      return {
+        type: 'enhance_script',
+        ...(story ? { story } : {}),
+        ...(storyPath ? { storyPath } : {}),
+        mode: getLooseStringArg(args, 'mode') as Extract<AgentAction, { type: 'enhance_script' }>['mode'],
+        subject: getLooseStringArg(args, 'subject') as Extract<AgentAction, { type: 'enhance_script' }>['subject'],
+        identityMode: getLooseStringArg(args, 'identityMode', 'identity_mode') as Extract<AgentAction, { type: 'enhance_script' }>['identityMode'],
+        ratio: getLooseStringArg(args, 'ratio', 'aspectRatio', 'aspect_ratio'),
+        ...(totalSeconds !== undefined ? { totalSeconds } : {}),
+        ...(segmentCapSeconds !== undefined ? { segmentCapSeconds } : {}),
+        subtitleMode: getLooseStringArg(args, 'subtitleMode', 'subtitle_mode') as Extract<AgentAction, { type: 'enhance_script' }>['subtitleMode'],
+        ...(args?.allowAdaptation === true || args?.allow_adaptation === true ? { allowAdaptation: true } : {}),
+      };
+    }
     case 'transcribe_audio':
     case 'stt':
     case 'speech_to_text': {
@@ -1552,6 +1572,7 @@ function isConcreteExecutionAction(action: AgentAction): boolean {
     case 'generate_long_video':
     case 'synthesize_speech':
     case 'transcribe_audio':
+    case 'enhance_script':
     case 'place_call':
     case 'create_presentation':
     case 'create_document':
@@ -2271,6 +2292,7 @@ function summarizeActionForWorkflow(action: AgentAction): string {
     case 'notebook_addTag': return `notebook_addTag`;
     case 'notebook_removeTag': return `notebook_removeTag`;
     case 'notebook_tree': return `notebook_tree`;
+    case 'enhance_script': return `enhance_script(${action.mode ?? 'auto'})`;
     default: {
       const exhaustive: never = action;
       return String(exhaustive);

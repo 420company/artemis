@@ -172,6 +172,7 @@ const MAIN_USER_FACING_ACTION_TYPES: AgentAction['type'][] = [
   'generate_long_video',
   // Speech.
   'synthesize_speech',
+  'enhance_script',
   'transcribe_audio',
   // Phone calls for the owner (each one approved by the owner first).
   'place_call',

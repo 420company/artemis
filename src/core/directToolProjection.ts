@@ -158,6 +158,7 @@ const AMBIENT_INFO_TOOLS = [
 
 const SPEECH_TOOLS = [
   'synthesize_speech',
+  'enhance_script',
   'transcribe_audio',
 ] as const;
 
