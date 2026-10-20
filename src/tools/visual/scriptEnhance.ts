@@ -231,38 +231,93 @@ ${storyText}${slotBrief}
 }
 
 /**
- * How much script a film of this length can hold, from the prompt's own
- * constraints: segments run 6-10 seconds and carry 120-250 characters of
- * shot information each.
+ * How much script a film of this length can hold.
+ *
+ * Two constraints, and both are read from the model actually configured
+ * rather than from the guide's old numbers. The guide was written when a clip
+ * was 6-10 seconds; Seedance 2.0 films 15 seconds in one clip and 2.5 films
+ * 30, so segment counts taken from the guide are wrong by a factor of three
+ * on the current models.
+ *
+ *   how much action a second of film can carry — the guide's "120-250 字
+ *     镜头信息 per 6-10 秒 段" is a density, about 20-42 characters per second
+ *     of finished video, and that part does not change with the clip length;
+ *   how much of a segment's prompt is left for the owner's words — the
+ *     model's prompt limit less what generate_video adds back (the Director's
+ *     lines and the rendering rules).
  *
  * It matters because of what the owner actually wants to paste in: a novel.
  * "Every word is sacred" is a rule about not rewriting, and it only holds
- * when the text is roughly the length of the film. A 60-second video holds
- * on the order of a thousand characters; a 100,000-character novel does not
- * fit into it at any ratio, so a pass that promised to keep every word would
- * be lying. Checking first also keeps us from paying for a call that cannot
- * succeed.
+ * when the text is roughly the length of the film. Checking first also keeps
+ * us from paying for a call that cannot succeed.
  */
-export function scriptLengthBudget(totalSeconds: number): { minChars: number; maxChars: number; segments: number } {
-  const seconds = Math.max(6, Math.round(totalSeconds));
-  const segments = Math.max(1, Math.round(seconds / 8));
-  return { segments, minChars: segments * 120, maxChars: segments * 250 };
+export type ScriptLimits = {
+  /** L, the longest single clip, from videoCapabilities.ts. */
+  maxClipSeconds?: number;
+  /** The model's prompt limit. */
+  maxPromptChars?: number;
+  /** What generate_video adds to each segment prompt (sagaSegmentPromptReserve()). */
+  segmentPromptReserve?: number;
+};
+
+export type ScriptBudget = {
+  clipSeconds: number;
+  segments: number;
+  minChars: number;
+  maxChars: number;
+  /** Room left for the owner's own words in one segment prompt. */
+  authoredCharsPerSegment: number;
+};
+
+/** The guide's 120-250 字 per 6-10 秒 segment, as characters per second of film. */
+const CHARS_PER_SECOND_MIN = 20;
+const CHARS_PER_SECOND_MAX = 42;
+/** Used only when nothing is configured: the shortest clip any supported model films. */
+const FALLBACK_CLIP_SECONDS = 10;
+const FALLBACK_PROMPT_CHARS = 2600;
+const FALLBACK_SEGMENT_RESERVE = 1545;
+/** However tight the prompt limit is, a segment still carries a sentence or two. */
+const MIN_AUTHORED_CHARS = 400;
+
+export function scriptLengthBudget(totalSeconds: number, limits: ScriptLimits = {}): ScriptBudget {
+  const seconds = Math.max(1, Math.round(totalSeconds));
+  const clipSeconds = Math.max(1, Math.round(limits.maxClipSeconds ?? FALLBACK_CLIP_SECONDS));
+  const segments = Math.max(1, Math.ceil(seconds / clipSeconds));
+  const promptChars = limits.maxPromptChars ?? FALLBACK_PROMPT_CHARS;
+  const reserve = limits.segmentPromptReserve ?? FALLBACK_SEGMENT_RESERVE;
+  const authoredCharsPerSegment = Math.max(MIN_AUTHORED_CHARS, promptChars - reserve);
+  const byDensity = { min: seconds * CHARS_PER_SECOND_MIN, max: seconds * CHARS_PER_SECOND_MAX };
+  // Whichever runs out first.
+  const maxChars = Math.min(byDensity.max, segments * authoredCharsPerSegment);
+  return {
+    clipSeconds,
+    segments,
+    minChars: Math.min(byDensity.min, maxChars),
+    maxChars,
+    authoredCharsPerSegment,
+  };
 }
 
 /** Over this multiple of the budget, structuring the text as written is arithmetic, not judgement. */
 const OVER_BUDGET_FACTOR = 2.5;
 
 export type SourceLengthVerdict =
-  | { fits: true; chars: number; maxChars: number }
-  | { fits: false; chars: number; maxChars: number; timesOver: number };
+  | { fits: true; chars: number; budget: ScriptBudget }
+  | { fits: false; chars: number; budget: ScriptBudget; timesOver: number; secondsNeeded: number };
 
 /** Whether the pasted text can be filmed as written at this duration. */
-export function checkSourceLength(story: string, totalSeconds: number): SourceLengthVerdict {
+export function checkSourceLength(story: string, totalSeconds: number, limits: ScriptLimits = {}): SourceLengthVerdict {
   const chars = String(story ?? '').replace(/\s+/g, '').length;
-  const { maxChars } = scriptLengthBudget(totalSeconds);
-  const limit = Math.round(maxChars * OVER_BUDGET_FACTOR);
-  if (chars <= limit) return { fits: true, chars, maxChars };
-  return { fits: false, chars, maxChars, timesOver: Math.round((chars / maxChars) * 10) / 10 };
+  const budget = scriptLengthBudget(totalSeconds, limits);
+  if (chars <= Math.round(budget.maxChars * OVER_BUDGET_FACTOR)) return { fits: true, chars, budget };
+  return {
+    fits: false,
+    chars,
+    budget,
+    timesOver: Math.round((chars / budget.maxChars) * 10) / 10,
+    // The film this text would actually need, at the densest the guide allows.
+    secondsNeeded: Math.ceil(chars / CHARS_PER_SECOND_MAX),
+  };
 }
 
 export type EnhancedScript = {

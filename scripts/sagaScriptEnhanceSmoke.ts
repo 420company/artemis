@@ -31,33 +31,60 @@ function modeChecks(): void {
 /**
  * The owner wants to drop a novel in. A rule about not rewriting only holds
  * when the text is roughly the length of the film, so the arithmetic is
- * checked before the call rather than discovered by paying for one.
+ * checked before the call rather than discovered by paying for one -- and it
+ * is read from the model actually configured, because a clip is 15 seconds on
+ * Seedance 2.0 and 30 on 2.5 while the guide that set 6-10 predates both.
  */
 function budgetChecks(): void {
-  const oneMinute = scriptLengthBudget(60);
-  assert.equal(oneMinute.segments, 8);
-  assert.equal(oneMinute.minChars, 960);
-  assert.equal(oneMinute.maxChars, 2000);
-  // The longest film the panel allowed.
-  const tenMinutes = scriptLengthBudget(600);
-  assert.equal(tenMinutes.segments, 75);
-  assert.equal(tenMinutes.maxChars, 18_750);
+  // Seedance 2.0: 15-second clips, 4,000-character prompts, 1,545 reserved.
+  const s20 = { maxClipSeconds: 15, maxPromptChars: 4000, segmentPromptReserve: 1545 };
+  const s25 = { maxClipSeconds: 30, maxPromptChars: 4000, segmentPromptReserve: 1545 };
+
+  const minute20 = scriptLengthBudget(60, s20);
+  assert.equal(minute20.clipSeconds, 15);
+  assert.equal(minute20.segments, 4, '60 秒在 2.0 上是 4 段，不是说明书的 8 段');
+  assert.equal(minute20.authoredCharsPerSegment, 2455);
+  // Density binds here, not the prompt limit: 60s * 42 < 4 * 2455.
+  assert.equal(minute20.maxChars, 2520);
+  assert.equal(minute20.minChars, 1200);
+
+  const minute25 = scriptLengthBudget(60, s25);
+  assert.equal(minute25.segments, 2, '同样 60 秒，2.5 只要 2 段');
+  // The clip length decides how many segments, never how much a second of
+  // film can carry, so the budget is the same on both models.
+  assert.equal(minute25.maxChars, minute20.maxChars);
+
+  // The prompt limit binds instead when a model has little room per segment:
+  // 4 segments of 600 characters is under what 60 seconds could carry.
+  const tight = scriptLengthBudget(60, { maxClipSeconds: 15, maxPromptChars: 2000, segmentPromptReserve: 1400 });
+  assert.equal(tight.authoredCharsPerSegment, 600);
+  assert.equal(tight.maxChars, 2400);
+  assert.ok(tight.minChars <= tight.maxChars, 'the floor never exceeds the ceiling');
+  // And a prompt limit tighter than one sentence still leaves a sentence.
+  assert.equal(scriptLengthBudget(60, { maxPromptChars: 1500, segmentPromptReserve: 1545 }).authoredCharsPerSegment, 400);
+
+  // The clip length changes the segment count, never the words a second holds.
+  assert.equal(scriptLengthBudget(600, s20).segments, 40);
+  assert.equal(scriptLengthBudget(600, s25).segments, 20);
+  assert.equal(scriptLengthBudget(600, s20).maxChars, scriptLengthBudget(600, s25).maxChars);
+
+  // Nothing configured: the shortest clip any supported model films.
+  assert.equal(scriptLengthBudget(60).clipSeconds, 10);
 
   // A script the size of the film goes through.
-  const fits = checkSourceLength('字'.repeat(1800), 60);
-  assert.equal(fits.fits, true);
-  // Some slack above the budget still goes through: the cap is prose padding,
-  // not a hard limit on what can be structured.
-  assert.equal(checkSourceLength('字'.repeat(4800), 60).fits, true);
-  // A novel does not.
-  const novel = checkSourceLength('字'.repeat(100_000), 60);
+  assert.equal(checkSourceLength('字'.repeat(1800), 60, s20).fits, true);
+  // Some slack above the budget still goes through: the cap is prose padding.
+  assert.equal(checkSourceLength('字'.repeat(6000), 60, s20).fits, true);
+  // A novel does not, and the answer says what duration it would need.
+  const novel = checkSourceLength('字'.repeat(100_000), 60, s20);
   assert.equal(novel.fits, false);
   if (novel.fits === false) {
     assert.equal(novel.chars, 100_000);
-    assert.equal(novel.timesOver, 50);
+    // 100,000 characters at 42 per second is about 40 minutes of film.
+    assert.equal(novel.secondsNeeded, 2381);
   }
   // Whitespace is not content.
-  assert.equal(checkSourceLength(`${'字'.repeat(1000)}\n\n   \n`, 60).chars, 1000);
+  assert.equal(checkSourceLength(`${'字'.repeat(1000)}\n\n   \n`, 60, s20).chars, 1000);
 }
 
 /** The specs the panel injected, and the rules only the UI knows. */

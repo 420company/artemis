@@ -966,6 +966,9 @@ export type AgentAction =
       totalSeconds?: number;
       segmentCapSeconds?: number;
       subtitleMode?: 'off' | 'auto' | 'always';
+      /** The video model the script is budgeted against; the configured one by default. */
+      provider?: string;
+      model?: string;
       /** Film a text longer than the duration can hold, by adapting it. */
       allowAdaptation?: boolean;
     }

@@ -21,18 +21,49 @@ import {
   describeScriptEnhanceMode,
   detectScriptEnhanceMode,
   parseEnhancedScript,
-  scriptLengthBudget,
   type DirectorPackInput,
   type ScriptEnhanceMode,
 } from './visual/scriptEnhance.js';
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { getMediaOutputRoot } from '../utils/mediaOutputRoot.js';
 import { toolLog } from '../utils/log.js';
+import { resolveConfiguredVisualProvider } from '../utils/visualGenerationConfig.js';
+import { resolveVideoModelLimits } from './visual/videoModelLimits.js';
+import { sagaSegmentPromptReserve } from './generateVideo.js';
+import type { ScriptLimits } from './visual/scriptEnhance.js';
 
 type EnhanceScriptAction = Extract<AgentAction, { type: 'enhance_script' }>;
 
 /** A whole five-part script takes longer than a chat turn. */
 const ENHANCE_TIMEOUT_MS = 6 * 60_000;
+
+/** The configured video model's real limits; the action may name one instead. */
+async function resolveScriptLimits(action: EnhanceScriptAction, cwd: string): Promise<ScriptLimits> {
+  let provider = action.provider;
+  let model = action.model;
+  if (!provider || !model) {
+    const configured = await resolveConfiguredVisualProvider(cwd, 'video').catch(() => null);
+    provider = provider ?? configured?.config.video?.provider;
+    model = model ?? configured?.config.video?.model;
+  }
+  if (!provider || !model) return { segmentPromptReserve: sagaSegmentPromptReserve() };
+  const limits = resolveVideoModelLimits(provider, model);
+  return {
+    maxClipSeconds: limits.maxSegmentSeconds,
+    maxPromptChars: limits.maxPromptChars,
+    segmentPromptReserve: sagaSegmentPromptReserve(),
+  };
+}
+
+/** Seconds as something a person reads: 4500 is "1 小时 15 分", not 4500. */
+function formatDuration(seconds: number): string {
+  if (seconds < 90) return `${seconds} 秒`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 90) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest > 0 ? `${hours} 小时 ${rest} 分` : `${hours} 小时`;
+}
 
 function directorInput(action: EnhanceScriptAction): DirectorPackInput {
   return {
@@ -66,23 +97,26 @@ export async function executeEnhanceScript(
 
   // Checked before the call, not after: a text far longer than the film can
   // hold cannot be structured as written, and asking the model to try costs
-  // the owner a long call to be told so.
+  // the owner a long call to be told so. The budget comes from the model
+  // actually configured -- a clip is 15 seconds on Seedance 2.0 and 30 on
+  // 2.5, so the guide's old 6-10 is wrong by a factor of three.
   const totalSeconds = action.totalSeconds ?? 60;
-  const length = checkSourceLength(story, totalSeconds);
+  const limits = await resolveScriptLimits(action, context.cwd);
+  const length = checkSourceLength(story, totalSeconds, limits);
   if (!length.fits && action.allowAdaptation !== true) {
-    const budget = scriptLengthBudget(totalSeconds);
+    const { budget } = length;
     return {
       action,
       ok: false,
       output: [
-        `这份文字 ${length.chars} 字，而 ${totalSeconds} 秒的片子装得下约 ${budget.minChars}-${budget.maxChars} 字（${budget.segments} 段，每段 6-10 秒）——超了约 ${length.timesOver} 倍。`,
+        `这份文字 ${length.chars} 字，而 ${totalSeconds} 秒的片子装得下约 ${budget.minChars}-${budget.maxChars} 字（${budget.segments} 段 × 单段 ${budget.clipSeconds} 秒）——超了约 ${length.timesOver} 倍。`,
         '',
         '「不改你的字」在这个长度上做不到，所以先定一件事：',
         '· 拍其中一段：告诉我拍哪一章/哪一段，那一段按原文结构化，一个字不改。',
         '· 改编全文：我按总时长抽主线改成剧本，会丢掉大量原文，改完给你看了再拍。',
-        `· 或者把总时长加长（最长 600 秒，约装 ${scriptLengthBudget(600).minChars}-${scriptLengthBudget(600).maxChars} 字）。`,
+        `· 或者把总时长拉到约 ${formatDuration(length.secondsNeeded)}，这份文字就装得下了。`,
       ].join('\n'),
-      data: { tooLong: true, chars: length.chars, budget },
+      data: { tooLong: true, chars: length.chars, budget, secondsNeeded: length.secondsNeeded },
     };
   }
 
