@@ -461,9 +461,9 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     baseUrl: 'https://api.xiaomimimo.com/v1',
     apiKeyHeader: 'api-key',
     suggestedModels: [
-      'mimo-v2.5-pro',
+      'mimo-v2.6-pro',
       'mimo-v2-pro',
-      'mimo-v2.5',
+      'mimo-v2.6-flash',
       'mimo-v2-omni',
       'mimo-v2.5-tts',
       'mimo-v2.5-tts-voicedesign',
