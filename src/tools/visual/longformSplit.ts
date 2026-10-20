@@ -87,9 +87,9 @@ export function detectFormat(text: string): LongformFormat {
 
 // ─── boundaries ───────────────────────────────────────────────────────────
 
-const CHAPTER_RE = /^[ \t　]*(?:第\s*[0-9０-９一二三四五六七八九十百千零〇]+\s*[章回节卷话篇幕]|楔子|序章|序言|前言|尾声|终章|后记|Chapter\s+[0-9IVXLC]+|CHAPTER\s+[0-9IVXLC]+|#{1,3}\s+\S)[^\n]{0,60}$/gim;
+const CHAPTER_RE = /^[ \t\u3000]*(?:第\s*[0-9０-９一二三四五六七八九十百千零〇]+\s*[章回节卷话篇幕]|楔子|序章|序言|前言|尾声|终章|后记|Chapter\s+[0-9IVXLC]+|CHAPTER\s+[0-9IVXLC]+|#{1,3}\s+\S)[^\n]{0,60}$/gim;
 /** A line that is only a separator: *** / --- / ◇◇◇ / § / ＊＊＊ */
-const SCENE_MARKER_RE = /^[ \t　]*(?:[*＊·•◇◆○●□■§~～=_\-—–]{3,}|(?:[*＊]\s?){3,}|(?:[-—–]\s?){3,})[ \t　]*$/gim;
+const SCENE_MARKER_RE = /^[ \t\u3000]*(?:[*＊·•◇◆○●□■§~～=_\-—–]{3,}|(?:[*＊]\s?){3,}|(?:[-—–]\s?){3,})[ \t\u3000]*$/gim;
 
 /** Opening and closing quotes, for the depth we must never cut inside. */
 const QUOTE_PAIRS: ReadonlyArray<readonly [string, string]> = [['「', '」'], ['『', '』'], ['“', '”'], ['‘', '’'], ['《', '》'], ['〈', '〉']];
@@ -118,7 +118,7 @@ export function quoteDepths(text: string): Uint8Array {
 }
 
 /** 「我回来了。」他说 — the attribution belongs to the line before it. */
-const ATTRIBUTION_RE = /^[ \t　]*(?:[^\n，。！？\s]{1,8})?(?:说道?|问道?|答道?|喊道?|笑道|回答|低声|轻声|said|asked|replied|whispered)/;
+const ATTRIBUTION_RE = /^[ \t\u3000]*(?:[^\n，。！？\s]{1,8})?(?:说道?|问道?|答道?|喊道?|笑道|回答|低声|轻声|said|asked|replied|whispered)/;
 
 const SENTENCE_END_RE = /[。！？…]+[”’」』）)】]*|[.!?]+["'”’)\]]*(?=\s)/g;
 
@@ -148,13 +148,13 @@ export function findBoundaries(text: string): Boundary[] {
     const afterNewline = text.indexOf('\n', end);
     put(afterNewline >= 0 ? afterNewline + 1 : end, 'scene-marker');
   }
-  for (const match of text.matchAll(/\n[ \t　]*(?:\r?\n[ \t　]*){2,}/g)) {
+  for (const match of text.matchAll(/\n[ \t\u3000]*(?:\r?\n[ \t\u3000]*){2,}/g)) {
     put(match.index! + match[0].length, 'blank-run');
   }
-  for (const match of text.matchAll(/\n[ \t　]*\r?\n[ \t　]*/g)) {
+  for (const match of text.matchAll(/\n[ \t\u3000]*\r?\n[ \t\u3000]*/g)) {
     put(match.index! + match[0].length, 'blank');
   }
-  for (const match of text.matchAll(/\n[ \t]*[　　]{1,4}(?=\S)/g)) {
+  for (const match of text.matchAll(/\n[ \t]*[\u3000]{1,4}(?=\S)/g)) {
     put(match.index! + 1, 'paragraph');                 // an indented new paragraph
   }
   for (const match of text.matchAll(/\n(?=\S)/g)) {
@@ -233,7 +233,7 @@ function levelsFrom(level: BoundaryLevel): BoundaryLevel[] {
  */
 export function splitLongform(text: string, options: SplitOptions = {}): LongformChunk[] {
   const { targetChars, maxChars, minChars } = { ...DEFAULTS, ...options };
-  const source = text.replace(/\r\n?/g, '\n').replace(/^﻿/, '');
+  const source = text.replace(/\r\n?/g, '\n').replace(/^\uFEFF/, '');
   if (source.trim().length === 0) return [];
   const boundaries = findBoundaries(source);
 
