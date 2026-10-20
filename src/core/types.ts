@@ -720,6 +720,13 @@ export type AgentAction =
       shots?: Array<{
         title?: string;
         duration?: number;
+        /**
+         * This shot opens a scene, so it inherits nothing from the shot
+         * before it: no closing frame, no camera, no light. Set by whatever
+         * cut the source up (longformSplit.ts for a novel), because only that
+         * knows where one scene ended and the next began.
+         */
+        opensScene?: boolean;
         storyBeat?: string;
         visualPrompt?: string;
         prompt?: string;
@@ -806,6 +813,12 @@ export type AgentAction =
        * 'skip' leaves it out and finishes the rest. Long films want 'skip'.
        */
       onSegmentFailure?: 'stop' | 'skip';
+      /**
+       * How many independent shot chains to film at once. Chains are the runs
+       * of segments between hard cuts and scene boundaries; segments inside
+       * one still wait for the previous closing frame. Default 3.
+       */
+      segmentConcurrency?: number;
       chainReferenceFrames?: 'auto' | 'always' | 'off';
       crossfadeMs?: number;
       defaultTransition?:

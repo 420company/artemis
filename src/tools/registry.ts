@@ -563,7 +563,7 @@ const ACTION_ARGUMENT_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
   generate_long_video: new Set([
     'type', 'toolType', 'prompt', 'title', 'story', 'referenceNotes', 'shots', 'continuity', 'model', 'ratio', 'duration',
     'totalDuration', 'projectId', 'outputPath', 'assemblyMode', 'resume', 'preserveUserScript', 'resolution', 'cleanDirect',
-    'rawPassthrough', 'onSegmentFailure', 'chainReferenceFrames', 'crossfadeMs', 'defaultTransition', 'continuityMode', 'colorMatch', 'quality',
+    'rawPassthrough', 'onSegmentFailure', 'segmentConcurrency', 'chainReferenceFrames', 'crossfadeMs', 'defaultTransition', 'continuityMode', 'colorMatch', 'quality',
     'fps', 'gpu', 'videoBitrate', 'crf', ...VIDEO_REFERENCE_KEYS, 'storyboardImageUrls', 'storyboardImagePaths',
     'soundtrackPath', 'soundtrackUrl', 'soundtrackStartSec', 'soundtrackVolumeDb', 'environmentVolumeDb',
     'soundtrackFadeInSec', 'soundtrackFadeOutSec', 'generateAudio', 'subtitleMode', 'watermark', 'maxPolls',
@@ -750,6 +750,7 @@ function validateGenerateLongVideoAction(action: any): string[] {
   validateBooleanValue(action?.cleanDirect, 'cleanDirect', errors);
   validateBooleanValue(action?.rawPassthrough, 'rawPassthrough', errors);
   validateEnumString(action?.onSegmentFailure, 'onSegmentFailure', ['stop', 'skip'] as const, errors);
+  validatePositiveInteger(action?.segmentConcurrency, 'segmentConcurrency', errors);
   validateEnumString(action?.chainReferenceFrames, 'chainReferenceFrames', ['auto', 'always', 'off'] as const, errors);
   validateEnumString(action?.continuityMode, 'continuityMode', ['auto', 'strong-vision', 'text-only'] as const, errors);
   validatePositiveInteger(action?.crossfadeMs, 'crossfadeMs', errors);

@@ -27,8 +27,16 @@ import { setVideoGenerationStubForTests } from '../src/tools/generateVideo.js';
 
 const execFileAsync = promisify(execFile);
 
-/** Every request the pipeline would have sent. */
+/**
+ * Every request the pipeline would have sent.
+ *
+ * Keyed by segment, never by arrival: chains are filmed concurrently, so the
+ * order requests come in is not the order of the film. An assertion written
+ * against arrival order passes or fails by timing, which is worse than no
+ * assertion.
+ */
 type Captured = {
+  segment: number;
   prompt: string;
   duration: number;
   resolution?: string | undefined;
@@ -98,6 +106,7 @@ async function run(options: {
     const extra = options.prepare ? await options.prepare(root, bin) : {};
     setVideoGenerationStubForTests(async (action: GenerateVideoAction) => {
       captured.push({
+        segment: Number(/(\d{3})\.mp4$/.exec(action.outputPath ?? '')?.[1] ?? 0),
         prompt: action.prompt ?? '',
         duration: action.duration ?? 0,
         resolution: action.resolution,
@@ -123,6 +132,8 @@ async function run(options: {
       } as never,
       context(root),
     );
+    // In the film's order, so an assertion means what it says.
+    captured.sort((a, b) => a.segment - b.segment);
     return { captured, output: result.output ?? '', ok: result.ok === true, projectDir };
   } finally {
     setVideoGenerationStubForTests(undefined);
@@ -310,12 +321,47 @@ async function skipRun(): Promise<void> {
   }
 }
 
+/**
+ * A scene boundary breaks the frame chain. Not for speed: chapter six opens
+ * somewhere else, on another day, with other people, so carrying chapter
+ * five's closing frame into it is wrong.
+ */
+async function sceneBoundaryRun(): Promise<void> {
+  const { captured, ok, output } = await run({
+    model: 'dreamina-seedance-2-0-260128',
+    action: {
+      prompt: '三场互不相连的戏',
+      title: '场景边界',
+      duration: 30,
+      ratio: '16:9',
+      preserveUserScript: true,
+      shots: [
+        { title: '雨夜门口', duration: 10, storyBeat: '阿雨站在门口，中景，固定机位，把钥匙插进锁孔。', opensScene: true },
+        { title: '走进屋里', duration: 10, storyBeat: '阿雨从左向右走进屋内，跟拍，台灯的黄光落在桌面上。' },
+        { title: '三年后的沙漠', duration: 10, storyBeat: '沙丘脊线在正午白光里，骆驼影子很短，商队铃声从背后传来。', opensScene: true },
+      ],
+    },
+  });
+  assert.equal(ok, true, output);
+  assert.equal(captured.length, 3);
+  // Segment 2 continues segment 1, so it inherits the closing frame.
+  assert.ok(captured[1]!.referenceImagePaths.length > 0, '同一场戏内部要接末帧');
+  // Segment 3 opens a scene, so it inherits nothing.
+  assert.equal(captured[0]!.referenceImagePaths.length, 0, '第一段没有上一段');
+  assert.equal(captured[2]!.referenceImagePaths.length, 0, '开新场的段不该继承上一场的末帧');
+  // The two chains were filmed independently: that is what the frame
+  // references above show, and it is the only part worth asserting here --
+  // the ordering and the bound are covered by the chain unit tests, and the
+  // one-line summary goes to the log rather than into this result.
+}
+
 async function main(): Promise<void> {
   setSagaFinalRenderSkippedForTests(false);
   await scriptedRun();
   await rawRun();
   await soundtrackRun();
   await skipRun();
+  await sceneBoundaryRun();
   console.log('saga pipeline dry run: ok');
 }
 
