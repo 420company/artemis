@@ -675,7 +675,7 @@ export function compileShotPromptWithContinuity(options: {
   // cleanDirect and raw passthrough skip generate_video's dialogue note, so
   // the segment carries its own (this segment's lines only).
   const dialogueNote = options.cleanDirect || options.rawPassthrough
-    ? buildSagaDialogueNote(options.storyBeat ?? '', options.subtitleMode)
+    ? buildSagaDialogueNote(options.storyBeat ?? '', options.subtitleMode, options.duration)
     : '';
   const lockedCamera = /locked-off|no camera movement|锁死/i.test(options.camera ?? '');
   // The identity card's [CAMERA] already spells a locked camera out in full.

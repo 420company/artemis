@@ -15,6 +15,8 @@ import {
 import type { ToolExecutionContext, ToolExecutionResult } from './types.js';
 import { executeGenerateVideo, sagaSegmentPromptReserve } from './generateVideo.js';
 import { dropsDressing, promptFidelity, stripCleanDirectInstruction, stripRawModeTag } from './visual/rawModeTag.js';
+import { extractSegmentSoundtrack, generateAudioWithSoundtrack, logSoundtrackReference, soundtrackReferenceEligible } from './visual/segmentSoundtrack.js';
+import { decideAfterSegmentFailure, describeSkippedSegments, lowerResolution } from './visual/segmentDegrade.js';
 import { normalizeVideoResolution, VIDEO_RESOLUTIONS } from './visual/videoParams.js';
 import {
   describeVideoGenerationFailure,
@@ -118,6 +120,8 @@ const DEFAULT_RATIO: SagaRatio = '16:9';
 const DEFAULT_TOTAL_SECONDS = 60;
 const MAX_TOTAL_SECONDS = 600;
 const DEFAULT_TRANSITION: SagaTransitionKind = 'cut';
+/** Three tries as before, then one cheaper try at a lower resolution. */
+const SEGMENT_ATTEMPTS = 4;
 const DEFAULT_CROSSFADE_MS = 350;
 const DEFAULT_LONG_VIDEO_SUBDIR = 'long-videos';
 // Floor (NOT a maximum). Match the custom provider default so Saga does not
@@ -2186,12 +2190,29 @@ export async function executeGenerateLongVideo(
     // retry with audio off if the provider's safety filter rejects the
     // audio for a particular segment.
     const userAudioPreference = action.generateAudio ?? limits.canGenerateAudio;
+    // Seedance 2.5 animates to an audio reference, so a music video's picture
+    // can be on the beat instead of hoping it lands there. Each segment gets
+    // its own slice; the whole track tells a 30-second clip nothing about
+    // which 30 seconds are its own.
+    const soundtrackReference = soundtrackReferenceEligible({
+      referenceInputs: limits.referenceInputs,
+      soundtrackPath: action.soundtrackPath,
+      verbatimSegments,
+    });
+    const segmentSoundtrackDir = path.join(projectDir, 'segments');
+    if (soundtrackReference) logSoundtrackReference(segments.length);
 
     const generatedPaths: string[] = [];
     const reusedSegmentPaths: string[] = [];
     const chainedFromPrev: string[] = [];
     const audioRetriedSegments: number[] = [];
     const chainDroppedSegments: number[] = [];
+    // Segments that never rendered. On a long film one unfilmable paragraph
+    // should not stop the other five hundred; the owner is told which are
+    // missing, and a re-run only pays for those.
+    const segmentFailureMode = action.onSegmentFailure ?? 'stop';
+    const skippedSegments: number[] = [];
+    let consecutiveSegmentFailures = 0;
     const userImageReferenceDroppedSegments: number[] = [];
 
     // If we hit the privacy filter on the chain frame multiple times in a
@@ -2397,6 +2418,26 @@ export async function executeGenerateLongVideo(
         // picture: the previous segment's last frame is not carried over.
         let usingChain = chainEnabled && previousLastFramePath !== undefined && !cutsIn;
         let usingAudio = userAudioPreference;
+        // This segment's own slice of the music, cut once and reused across
+        // the retries. A slice that cannot be cut is not a reason to fail the
+        // segment: the run goes on without it and the renderer still mixes
+        // the real track in at the end, exactly as it did before.
+        let segmentSoundtrackPath: string | undefined;
+        if (soundtrackReference && action.soundtrackPath) {
+          const slice = await extractSegmentSoundtrack({
+            soundtrackPath: action.soundtrackPath,
+            startOffsetSec: action.soundtrackStartSec ?? 0,
+            segmentStartSec: segmentStarts[segment.index - 1] ?? 0,
+            segmentDurationSec: segment.duration,
+            outputDir: segmentSoundtrackDir,
+            segmentIndex: segment.index,
+          });
+          if (slice.ok) {
+            segmentSoundtrackPath = slice.path;
+          } else {
+            toolWarn(`第 ${segment.index} 段的配乐切片没切出来（${slice.reason}），这一段不跟音乐，配乐仍会在合成时混入。`);
+          }
+        }
         let usingUserImageReferences = hasGlobalUserImageReferences;
         // Per-segment Image-2 keyframes can occasionally become too
         // photographic in real-person runs. BytePlus then rejects the bytes as
@@ -2408,8 +2449,17 @@ export async function executeGenerateLongVideo(
         let lastError = '';
         let lastFailure: VideoGenerationFailure | undefined;
         let succeeded = false;
+        // A fourth attempt at the same size would do what the first three
+        // did. A smaller one is a different request, it costs less, and a
+        // segment the owner can watch beats a hole in the film.
+        let degradedResolution: string | undefined;
 
-        for (let attempt = 0; attempt < 3 && !succeeded; attempt += 1) {
+        for (let attempt = 0; attempt < SEGMENT_ATTEMPTS && !succeeded; attempt += 1) {
+          if (attempt === SEGMENT_ATTEMPTS - 1) {
+            degradedResolution = lowerResolution(requestedResolution);
+            if (!degradedResolution) break;
+            toolWarn(`第 ${segment.index} 段三次都没出来，降到 ${degradedResolution} 再试一次。`);
+          }
           // role:"reference_image" — the only image role Saga long-video
           // routes user content through. Empirical testing showed
           // role:"first_frame" does NOT bypass the provider's real-person
@@ -2486,7 +2536,12 @@ export async function executeGenerateLongVideo(
               prompt: sanitizeForVideoProvider(promptToUse),
               referenceImageUrls: referenceImageUrlsForCall.length > 0 ? referenceImageUrlsForCall : undefined,
               referenceImagePaths,
-              generateAudio: usingAudio,
+              ...(segmentSoundtrackPath ? { referenceAudioPaths: [segmentSoundtrackPath] } : {}),
+              ...(degradedResolution ? { resolution: degradedResolution } : {}),
+              generateAudio: generateAudioWithSoundtrack({
+                usingSoundtrackReference: Boolean(segmentSoundtrackPath),
+                requested: usingAudio,
+              }),
             },
             context,
             // Saga's own channel (never action fields): the segment named in
@@ -2596,17 +2651,34 @@ export async function executeGenerateLongVideo(
 
         if (!succeeded) {
           segmentProgress(segment, 'failed');
-          return {
-            action,
-            ok: false,
-            output: [
-              `Long video: segment ${segment.index}/${segments.length} failed.`,
-              ...(lastFailure ? [`Reason: ${lastFailure.userMessage}`] : []),
-              scrubInternalNames(lastError),
-            ].join('\n'),
-            ...(lastFailure ? { error: videoFailureToolError(lastFailure) } : {}),
-          };
+          consecutiveSegmentFailures += 1;
+          const decision = decideAfterSegmentFailure({
+            mode: segmentFailureMode,
+            totalSegments: segments.length,
+            failedSoFar: skippedSegments.length + 1,
+            consecutiveFailures: consecutiveSegmentFailures,
+          });
+          if (decision.action === 'stop') {
+            return {
+              action,
+              ok: false,
+              output: [
+                `Long video: segment ${segment.index}/${segments.length} failed.`,
+                ...(segmentFailureMode === 'skip' ? [`Stopped rather than skipping it: ${decision.reason}.`] : []),
+                ...(lastFailure ? [`Reason: ${lastFailure.userMessage}`] : []),
+                scrubInternalNames(lastError),
+                ...(skippedSegments.length > 0 ? [describeSkippedSegments(skippedSegments, segments.length)] : []),
+              ].join('\n'),
+              ...(lastFailure ? { error: videoFailureToolError(lastFailure) } : {}),
+            };
+          }
+          skippedSegments.push(segment.index);
+          toolWarn(`第 ${segment.index} 段没有生成出来（${lastFailure?.userMessage ?? '未知原因'}），跳过，继续后面的段。`);
+          // Nothing to chain from a segment that does not exist.
+          previousLastFramePath = undefined;
+          continue;
         }
+        consecutiveSegmentFailures = 0;
 
         // After 2 consecutive image-privacy failures, this entire project
         // is people-heavy enough that further chain attempts will keep
@@ -2634,15 +2706,36 @@ export async function executeGenerateLongVideo(
       return { action, ok: true, output: `Long video: ${segments.length} segments generated; the final render was skipped.` };
     }
 
-    const segmentProbes = await Promise.all(segments.map((segment) => probeSegment(segment.outputPath)));
+    // Segments that never rendered are not in the film. Their transitions go
+    // with them, rebuilt from the shots that survived rather than reindexed
+    // by hand, so a crossfade never points at a clip that is not there.
+    const renderedSegments = skippedSegments.length === 0
+      ? segments
+      : segments.filter((segment) => !skippedSegments.includes(segment.index));
+    if (renderedSegments.length === 0) {
+      return {
+        action,
+        ok: false,
+        output: `Long video: none of the ${segments.length} segments rendered, so there is nothing to assemble.`,
+      };
+    }
+    const renderedTransitions = skippedSegments.length === 0
+      ? transitionPlans
+      : buildTransitionPlans({
+        ...(storyboardShots ? { shots: storyboardShots.filter((_, index) => !skippedSegments.includes(index + 1)) } : {}),
+        segmentCount: renderedSegments.length,
+        defaultKind: defaultTransition,
+        defaultMs: crossfadeMs,
+      });
+    const segmentProbes = await Promise.all(renderedSegments.map((segment) => probeSegment(segment.outputPath)));
 
     // Render via the Saga renderer (FFmpeg pipeline + composition + lint + inspect).
     const renderResult = await renderSagaProject({
       projectId,
       ratio,
       fps,
-      segments,
-      transitions: transitionPlans,
+      segments: renderedSegments,
+      transitions: renderedTransitions,
       hyperframesProjectDir,
       outputPath: resolvedOutput.absolute,
       workDir: projectDir,
@@ -2672,14 +2765,19 @@ export async function executeGenerateLongVideo(
     });
     const outputProbe = await probeSegment(resolvedOutput.absolute);
     const measuredOutputSeconds = outputProbe.durationSeconds ?? renderResult.durationSeconds;
-    const shortfallToleranceSeconds = Math.max(2, totalSeconds * 0.2);
-    if (measuredOutputSeconds + shortfallToleranceSeconds < totalSeconds) {
+    // A film with segments skipped is short on purpose; the check is about a
+    // render that silently lost footage, not about the gaps we reported.
+    const expectedSeconds = skippedSegments.length === 0
+      ? totalSeconds
+      : renderedSegments.reduce((sum, segment) => sum + segment.duration, 0);
+    const shortfallToleranceSeconds = Math.max(2, expectedSeconds * 0.2);
+    if (measuredOutputSeconds + shortfallToleranceSeconds < expectedSeconds) {
       return {
         action,
         ok: false,
         output: [
           'Long video: final duration verification failed.',
-          `Requested ${totalSeconds}s, renderer expected ${renderResult.durationSeconds.toFixed(2)}s, actual file is ${measuredOutputSeconds.toFixed(2)}s.`,
+          `Expected ${expectedSeconds}s, renderer expected ${renderResult.durationSeconds.toFixed(2)}s, actual file is ${measuredOutputSeconds.toFixed(2)}s.`,
           `Video: ${resolvedOutput.absolute}`,
           outputProbe.error ? `Probe: ${outputProbe.error}` : undefined,
         ].filter(Boolean).join('\n'),
@@ -3010,6 +3108,10 @@ export async function executeGenerateLongVideo(
       '',
       `🎬 Open: open "${resolvedOutput.absolute}"`,
     );
+    // Said on the way out too: a film with gaps must never look finished.
+    if (skippedSegments.length > 0) {
+      lines.push('', describeSkippedSegments(skippedSegments, segments.length));
+    }
 
     return {
       action,

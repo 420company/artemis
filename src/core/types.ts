@@ -801,6 +801,11 @@ export type AgentAction =
       // analysis, Super Visual, keyframes or Director), within the model's
       // prompt limit.
       rawPassthrough?: boolean;
+      /**
+       * One segment that will not render: 'stop' fails the run (the default),
+       * 'skip' leaves it out and finishes the rest. Long films want 'skip'.
+       */
+      onSegmentFailure?: 'stop' | 'skip';
       chainReferenceFrames?: 'auto' | 'always' | 'off';
       crossfadeMs?: number;
       defaultTransition?:
