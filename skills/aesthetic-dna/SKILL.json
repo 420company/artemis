@@ -1,0 +1,32 @@
+{
+  "id": "aesthetic-dna",
+  "name": "aesthetic-dna",
+  "description": "设计审美内核：网页界面、落地页、海报 logo、生图提示词、广告片与 MV 导演拍法的高级感判断，以及土不土、像不像山寨的防土规则。 Aesthetic judgment for visual work: premium look, kitsch check for contested elements by style, web taste rules, cinematic ad and music-video direction, and pre-delivery checks. Use it with design-workflow when building a site; use it alone to judge whether a poster, page or prompt looks cheap.",
+  "version": "1.0.0",
+  "author": "Artemis",
+  "tags": [
+    "design",
+    "aesthetic",
+    "ui",
+    "premium",
+    "landing",
+    "prompt",
+    "cinematic",
+    "poster",
+    "高级感",
+    "落地页",
+    "海报",
+    "电影感"
+  ],
+  "entryPoint": "tool_chain",
+  "category": "design",
+  "toolChain": [],
+  "inputs": [],
+  "outputs": [
+    {
+      "name": "result",
+      "type": "string",
+      "description": "Skill output"
+    }
+  ]
+}
