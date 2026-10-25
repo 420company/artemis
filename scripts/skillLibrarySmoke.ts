@@ -169,11 +169,18 @@ async function main(): Promise<void> {
     const library = await loadSkillLibrary(workspace)
     const skill = findLibrarySkill(library, 'aesthetic-dna')!
     assert.ok(skill && skill.source === 'bundled' && skill.category === 'design', 'bundled design skill')
-    for (const request of ['帮我做个落地页，要高级感', '写一个电影感的生图提示词', '这个海报土不土', 'make my landing page look premium']) {
+    for (const request of ['帮我做个落地页，要高级感', '写一个电影感的生图提示词', '这个海报土不土', 'make my landing page look premium', '做个海报', '帮我做一个 MV', '做个产品宣传视频', 'make a premium website']) {
       assert.match(renderSkillLibraryIndex(library, request), /\n- aesthetic-dna: /, request)
     }
-    for (const request of ['写个 SQL', 'write a SQL query for monthly revenue', REQUESTS[0]!, REQUESTS[3]!]) {
+    for (const request of ['写个 SQL', 'write a SQL query for monthly revenue', 'mv a.txt b.txt', REQUESTS[0]!, REQUESTS[3]!]) {
       assert.doesNotMatch(renderSkillLibraryIndex(library, request), /aesthetic-dna/, request)
+    }
+    // Building a site is the design workflow's job: it stays ahead of the taste rules.
+    for (const request of ['make a premium website', 'build me a website']) {
+      const index = renderSkillLibraryIndex(library, request)
+      const workflow = index.indexOf('\n- design-workflow: ')
+      const taste = index.indexOf('\n- aesthetic-dna: ')
+      assert.ok(workflow >= 0 && (taste < 0 || workflow < taste), `${request}: ${index}`)
     }
     const files = (await load({ id: 'aesthetic-dna' })).output
     for (const file of ['references/web-ui.md', 'references/anti-kitsch.md', 'references/image-prompt.md', 'references/video-direction.md', 'references/verification.md']) {

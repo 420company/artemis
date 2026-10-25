@@ -405,6 +405,8 @@ const ZH_TOPICS: Array<[RegExp, string]> = [
   [/配色|颜色|字体|排版/, 'color typography'],
   [/logo|标志|品牌/i, 'logo brand'],
   [/视频|短视频|剪辑/, 'video'],
+  [/\bMV\b|音乐视频|音乐短片/, 'music video'],
+  [/海报|封面/, 'poster cover'],
   [/会议|纪要|周报/, 'meeting notes report'],
   [/合规|隐私|gdpr|iso/i, 'compliance privacy gdpr iso'],
   [/交易|股票|行情|财报|宏观/, 'trading market stock earnings macro financial'],
